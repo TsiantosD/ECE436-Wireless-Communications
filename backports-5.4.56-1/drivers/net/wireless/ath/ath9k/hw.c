@@ -1162,12 +1162,12 @@ void ath9k_hw_init_global_settings(struct ath_hw *ah)
 
 	if (chanel_idle) {
 		REG_SET_BIT(ah, AR_DIAG_SW, AR_DIAG_FORCE_CH_IDLE_HIGH);
-		printk(KERN_INFO "ath9k: made channel idle all times!!!!");
+		printk(KERN_INFO "ath9k: made channel idle all times!!!!\n");
 	}
 
 	if (disable_backoff) {
 		REG_SET_BIT(ah, AR_D_GBL_IFS_MISC, AR_D_GBL_IFS_MISC_IGNORE_BACKOFF);
-		printk(KERN_INFO "ath9k: ignore backoff by setting AR_D_GBL_IFS_MISC_IGNORE_BACKOFF bit!!!!");
+		printk(KERN_INFO "ath9k: ignore backoff by setting AR_D_GBL_IFS_MISC_IGNORE_BACKOFF bit!!!!\n");
 	}
 }
 EXPORT_SYMBOL(ath9k_hw_init_global_settings);

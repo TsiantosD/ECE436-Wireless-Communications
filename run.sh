@@ -36,12 +36,13 @@ CHANNEL="${CHANNEL:-7}"
 RATES="${RATES:-5M,25M,50M,150M}"
 DURATION="${DURATION:-60}"
 FIXED_RATE_DEFAULT="${FIXED_RATE_DEFAULT:-150M}"
+DUAL_FAIR_LEAD_SECONDS="${DUAL_FAIR_LEAD_SECONDS:-10}"
 
 # Driver module options passed to ath9k_hw. Keep every known custom option
 # explicit in labels/configs so result directories document the exact mode.
 # NOTE: "chanel_idle" intentionally preserves the driver's exported typo.
-FAIR_DRIVER_OPTS="${FAIR_DRIVER_OPTS:-selfish_mode=0 disable_backoff=0 chanel_idle=0}"
-UNFAIR_DRIVER_OPTS="${UNFAIR_DRIVER_OPTS:-selfish_mode=1 disable_backoff=0 chanel_idle=0}"
+FAIR_DRIVER_OPTS="${FAIR_DRIVER_OPTS:-selfish_mode=0 disable_backoff=0 chanel_idle=0 selfish_txop_us=0}"
+UNFAIR_DRIVER_OPTS="${UNFAIR_DRIVER_OPTS:-selfish_mode=1 disable_backoff=0 chanel_idle=0 selfish_txop_us=0}"
 
 # IPERF defaults. iperf2 is assumed because NITLab images used iperf2 in previous tests.
 FAIR_PORT="${FAIR_PORT:-5004}"
@@ -90,19 +91,34 @@ get_opt_value() {
   printf '%s' "$default"
 }
 
+ensure_opt() {
+  local opts="$1" key="$2" default="$3"
+  if [[ " $opts " == *" $key="* ]]; then
+    printf '%s' "$opts"
+  else
+    printf '%s %s=%s' "$opts" "$key" "$default"
+  fi
+}
+
+normalize_driver_opts() {
+  FAIR_DRIVER_OPTS="$(ensure_opt "$FAIR_DRIVER_OPTS" selfish_txop_us 0)"
+  UNFAIR_DRIVER_OPTS="$(ensure_opt "$UNFAIR_DRIVER_OPTS" selfish_txop_us 0)"
+}
+
 bool_default_letter() {
   local value="${1:-0}"
   if [[ "$value" == "1" || "$value" =~ ^[Yy] ]]; then printf 'y'; else printf 'n'; fi
 }
 
 compose_driver_opts_prompt() {
-  local label="$1" current="$2" selfish disable idle extra opts
+  local label="$1" current="$2" selfish disable idle txop extra opts
   echo "Current $label options: ${current:-<none>}" >&2
   if prompt_yes_no "$label: selfish_mode" "$(bool_default_letter "$(get_opt_value "$current" selfish_mode 0)")"; then selfish=1; else selfish=0; fi
   if prompt_yes_no "$label: disable_backoff" "$(bool_default_letter "$(get_opt_value "$current" disable_backoff 0)")"; then disable=1; else disable=0; fi
   if prompt_yes_no "$label: chanel_idle (driver typo, AR_DIAG_FORCE_CH_IDLE_HIGH)" "$(bool_default_letter "$(get_opt_value "$current" chanel_idle 0)")"; then idle=1; else idle=0; fi
+  txop=$(prompt_default "$label: selfish_txop_us (0 disables custom TXOP)" "$(get_opt_value "$current" selfish_txop_us 0)")
   extra=$(prompt_default "$label: extra ath9k_hw options, if any" "")
-  opts="selfish_mode=$selfish disable_backoff=$disable chanel_idle=$idle"
+  opts="selfish_mode=$selfish disable_backoff=$disable chanel_idle=$idle selfish_txop_us=$txop"
   [[ -n "$extra" ]] && opts="$opts $extra"
   printf '%s' "$opts"
 }
@@ -194,7 +210,7 @@ run_action() {
 # ---------- Config load/store ----------
 config_keys=(
   GATEWAY SLICE_NAME IMAGE BACKPORTS_DIR NODE_LOG_DIR LOCAL_RESULTS_DIR PATCH_FILE SRC_REPO BASE_REF
-  AP_NODE FAIR_NODE UNFAIR_NODE AP_IP FAIR_IP UNFAIR_IP SSID CHANNEL RATES DURATION FIXED_RATE_DEFAULT
+  AP_NODE FAIR_NODE UNFAIR_NODE AP_IP FAIR_IP UNFAIR_IP SSID CHANNEL RATES DURATION FIXED_RATE_DEFAULT DUAL_FAIR_LEAD_SECONDS
   FAIR_DRIVER_OPTS UNFAIR_DRIVER_OPTS FAIR_PORT UNFAIR_PORT TCP_PORT_BASE
 )
 
@@ -235,7 +251,18 @@ load_config() {
   # shellcheck disable=SC1090
   source "$tmp"
   rm -f "$tmp"
+  normalize_driver_opts
   echo "Loaded config: $file"
+}
+
+load_default_config_if_present() {
+  local file="$SCRIPT_DIR/experiment.conf"
+  if [[ -f "$file" ]]; then
+    load_config "$file"
+  else
+    echo "Default config not found: $file" >&2
+    echo "Use Setup -> 8) export settings to config after configuring nodes." >&2
+  fi
 }
 
 # ---------- Setup commands ----------
@@ -338,13 +365,19 @@ log='$NODE_LOG_DIR/setup/${node}_backports_build_$(ts).log'
   depmod -a || true
   echo '[build] installed module info/params:'
   modinfo ath9k_hw 2>/dev/null | grep -E '^(filename|version|parm):' || true
-  if [[ \"\$install_rc\" -ne 0 ]]; then
-    if modinfo ath9k_hw 2>/dev/null | grep -q 'disable_backoff'; then
-      echo '[build] WARNING: make install returned non-zero, but patched ath9k_hw params are visible; continuing'
-    else
-      echo '[build] ERROR: make install returned non-zero and patched ath9k_hw params are not visible' >&2
-      exit \"\$install_rc\"
+  missing_params=''
+  for p in selfish_mode disable_backoff chanel_idle selfish_txop_us; do
+    if ! modinfo ath9k_hw 2>/dev/null | grep -qE '^parm:[[:space:]]*'\"\$p\"'[: ]'; then
+      missing_params=\"\$missing_params \$p\"
     fi
+  done
+  if [[ -n \"\$missing_params\" ]]; then
+    echo '[build] ERROR: installed ath9k_hw is missing custom params:'\"\$missing_params\" >&2
+    echo '[build] This usually means the patch was not applied to the source being built, or make install installed a different/stock module.' >&2
+    exit 1
+  fi
+  if [[ \"\$install_rc\" -ne 0 ]]; then
+    echo '[build] WARNING: make install returned non-zero, but all custom ath9k_hw params are visible; continuing'
   fi
 } 2>&1 | tee \"\$log\"
 "
@@ -366,18 +399,37 @@ load_driver_on_node() {
 set -euo pipefail
 mkdir -p '$NODE_LOG_DIR/setup'
 dmesg_start=\$(dmesg 2>/dev/null | wc -l || echo 0)
+requested_opts=\"$opts\"
+supported_params=\$(modinfo ath9k_hw 2>/dev/null | sed -n 's/^parm:[[:space:]]*\\([^: ]*\\).*/\\1/p' || true)
+effective_opts=''
+for kv in \$requested_opts; do
+  key=\"\${kv%%=*}\"
+  val=\"\${kv#*=}\"
+  if printf '%s\\n' \"\$supported_params\" | grep -qx \"\$key\"; then
+    effective_opts=\"\$effective_opts \$kv\"
+  elif [[ \"\$val\" == \"0\" || \"\$val\" == \"false\" || \"\$val\" == \"False\" || \"\$val\" == \"N\" || \"\$val\" == \"n\" ]]; then
+    echo \"[driver] WARNING: ath9k_hw does not support zero/default option '\$key'; dropping it before modprobe\" >&2
+  else
+    echo \"[driver] ERROR: ath9k_hw does not support requested option '\$key=\$val'\" >&2
+    echo '[driver] Run Setup -> deploy patch/build on this node, then reload drivers.' >&2
+    echo '[driver] Supported ath9k_hw params:' >&2
+    printf '  %s\\n' \$supported_params >&2
+    exit 1
+  fi
+done
 killall hostapd 2>/dev/null || true
 ip link set wlan0 down 2>/dev/null || true
 modprobe -r ath9k ath9k_common ath9k_hw ath mac80211 cfg80211 2>/dev/null || true
-modprobe ath9k_hw $opts
+modprobe ath9k_hw \$effective_opts
 modprobe ath9k
 {
   date
-  echo 'modprobe ath9k_hw $opts; modprobe ath9k'
+  echo 'requested ath9k_hw opts: $opts'
+  echo \"effective ath9k_hw opts:\$effective_opts\"
   lsmod | grep ath9k || true
   for p in /sys/module/ath9k_hw/parameters/*; do [[ -f \"\$p\" ]] && echo \"\$(basename \"\$p\")=\$(cat \"\$p\")\"; done
   echo '[dmesg] new ath9k-related lines from this load only:'
-  dmesg 2>/dev/null | tail -n +\$((dmesg_start + 1)) | grep -i 'ath9k\|selfish\|backoff\|force' || true
+  dmesg 2>/dev/null | tail -n +\$((dmesg_start + 1)) | grep -i 'ath9k\|selfish\|txop\|backoff\|force' || true
 } | tee '$NODE_LOG_DIR/setup/${node}_load_driver_$(join_opts_tag "$opts").log'
 "
 }
@@ -438,7 +490,7 @@ sleep 3
 prepare_topology() {
   require_nodes_config || return 1
   local unfair_opts="$1" fair_opts="$2" mode="${3:-n}"
-  load_driver_on_node "$AP_NODE" "selfish_mode=0 disable_backoff=0 chanel_idle=0" || return 1
+  load_driver_on_node "$AP_NODE" "selfish_mode=0 disable_backoff=0 chanel_idle=0 selfish_txop_us=0" || return 1
   load_driver_on_node "$FAIR_NODE" "$fair_opts" || return 1
   load_driver_on_node "$UNFAIR_NODE" "$unfair_opts" || return 1
   start_ap "$mode" || return 1
@@ -492,12 +544,22 @@ fi
 
 run_two_sta_once() {
   require_nodes_config || return 1
-  local proto="$1" fair_rate="$2" unfair_rate="$3" duration="$4" label="$5"
+  local proto="$1" fair_rate="$2" unfair_rate="$3" duration="$4" label="$5" fair_lead_seconds="${6:-$DUAL_FAIR_LEAD_SECONDS}"
+  if ! [[ "$fair_lead_seconds" =~ ^[0-9]+$ ]]; then
+    echo "Invalid fair lead delay: $fair_lead_seconds (must be non-negative integer seconds)" >&2
+    return 1
+  fi
   iperf_server "$AP_NODE" "$proto" "$FAIR_PORT" "$label" || return 1
   iperf_server "$AP_NODE" "$proto" "$UNFAIR_PORT" "$label" || return 1
   sleep 2
+  echo "[dual] starting fair STA first: node=$FAIR_NODE rate=$fair_rate duration=${duration}s"
   iperf_client "$FAIR_NODE" "$proto" "$AP_IP" "$fair_rate" "$duration" "$FAIR_PORT" "$label" "fair" &
   local fair_pid=$!
+  if (( fair_lead_seconds > 0 )); then
+    echo "[dual] waiting ${fair_lead_seconds}s before starting unfair STA"
+    sleep "$fair_lead_seconds"
+  fi
+  echo "[dual] starting unfair STA: node=$UNFAIR_NODE rate=$unfair_rate duration=${duration}s"
   iperf_client "$UNFAIR_NODE" "$proto" "$AP_IP" "$unfair_rate" "$duration" "$UNFAIR_PORT" "$label" "unfair" &
   local unfair_pid=$!
   local rc1=0 rc2=0
@@ -553,8 +615,13 @@ ask_fixed_rate_plan() {
 
 run_dual_test_with_plan() {
   local test_name="$1" proto="$2" fair_opts="$3" unfair_opts="$4" wifi_mode="$5"
-  local duration prefix plan mode fixed_node fixed_rate sweep_rates rate fair_rate unfair_rate label
+  local duration prefix plan mode fixed_node fixed_rate sweep_rates rate fair_rate unfair_rate label fair_lead_seconds
   duration=$(prompt_default "Duration seconds per run" "$DURATION")
+  fair_lead_seconds=$(prompt_default "Seconds to start fair STA before unfair STA" "$DUAL_FAIR_LEAD_SECONDS")
+  if ! [[ "$fair_lead_seconds" =~ ^[0-9]+$ ]]; then
+    echo "Invalid fair lead delay: $fair_lead_seconds (must be non-negative integer seconds)" >&2
+    return 1
+  fi
   prefix=$(prompt_default "Log prefix" "${test_name}_$(ts)")
   IFS='|' read -r mode fixed_node fixed_rate sweep_rates <<<"$(ask_fixed_rate_plan)"
   if prompt_yes_no "Prepare topology/load drivers before test?" "y"; then
@@ -566,26 +633,26 @@ run_dual_test_with_plan() {
   case "$mode" in
     none)
       for rate in $(split_csv "$sweep_rates"); do
-        label="${prefix}_proto_${proto}_rate_$(rate_tag "$rate")_fair_${fair_tag}_unfair_${unfair_tag}"
-        run_two_sta_once "$proto" "$rate" "$rate" "$duration" "$label" || return 1
+        label="${prefix}_proto_${proto}_rate_$(rate_tag "$rate")_fairlead_${fair_lead_seconds}s_fair_${fair_tag}_unfair_${unfair_tag}"
+        run_two_sta_once "$proto" "$rate" "$rate" "$duration" "$label" "$fair_lead_seconds" || return 1
       done
       ;;
     unfair)
       for rate in $(split_csv "$sweep_rates"); do
-        label="${prefix}_proto_${proto}_fair_sweep_$(rate_tag "$rate")_unfair_fixed_$(rate_tag "$fixed_rate")_fair_${fair_tag}_unfair_${unfair_tag}"
-        run_two_sta_once "$proto" "$rate" "$fixed_rate" "$duration" "$label" || return 1
+        label="${prefix}_proto_${proto}_fair_sweep_$(rate_tag "$rate")_unfair_fixed_$(rate_tag "$fixed_rate")_fairlead_${fair_lead_seconds}s_fair_${fair_tag}_unfair_${unfair_tag}"
+        run_two_sta_once "$proto" "$rate" "$fixed_rate" "$duration" "$label" "$fair_lead_seconds" || return 1
       done
       ;;
     fair)
       for rate in $(split_csv "$sweep_rates"); do
-        label="${prefix}_proto_${proto}_fair_fixed_$(rate_tag "$fixed_rate")_unfair_sweep_$(rate_tag "$rate")_fair_${fair_tag}_unfair_${unfair_tag}"
-        run_two_sta_once "$proto" "$fixed_rate" "$rate" "$duration" "$label" || return 1
+        label="${prefix}_proto_${proto}_fair_fixed_$(rate_tag "$fixed_rate")_unfair_sweep_$(rate_tag "$rate")_fairlead_${fair_lead_seconds}s_fair_${fair_tag}_unfair_${unfair_tag}"
+        run_two_sta_once "$proto" "$fixed_rate" "$rate" "$duration" "$label" "$fair_lead_seconds" || return 1
       done
       ;;
     both)
       IFS=',' read -r fair_rate unfair_rate <<<"$fixed_rate"
-      label="${prefix}_proto_${proto}_fair_fixed_$(rate_tag "$fair_rate")_unfair_fixed_$(rate_tag "$unfair_rate")_fair_${fair_tag}_unfair_${unfair_tag}"
-      run_two_sta_once "$proto" "$fair_rate" "$unfair_rate" "$duration" "$label" || return 1
+      label="${prefix}_proto_${proto}_fair_fixed_$(rate_tag "$fair_rate")_unfair_fixed_$(rate_tag "$unfair_rate")_fairlead_${fair_lead_seconds}s_fair_${fair_tag}_unfair_${unfair_tag}"
+      run_two_sta_once "$proto" "$fair_rate" "$unfair_rate" "$duration" "$label" "$fair_lead_seconds" || return 1
       ;;
   esac
 }
@@ -799,7 +866,7 @@ for p in /sys/module/ath9k_hw/parameters/*; do [[ -f \"\$p\" ]] && echo \"\$(bas
 ip addr show wlan0
 iw dev wlan0 link
 iw dev
-dmesg | grep -i 'ath9k\|selfish\|backoff\|force\|reset' | tail -80
+dmesg | grep -i 'ath9k\|selfish\|txop\|backoff\|force\|reset' | tail -80
 "
   done
 }
@@ -824,7 +891,7 @@ setup_menu() {
     case "$c" in
       1) local p; p=$(prompt_default "Patch filename" "$PATCH_FILE"); run_action "generate patch" generate_patch "$p"; pause;;
       2) AP_NODE=$(prompt_default "AP node" "$AP_NODE"); FAIR_NODE=$(prompt_default "Fair STA node" "$FAIR_NODE"); UNFAIR_NODE=$(prompt_default "Unfair STA node" "$UNFAIR_NODE"); AP_IP=$(prompt_default "AP IP" "$AP_IP"); FAIR_IP=$(prompt_default "Fair STA IP" "$FAIR_IP"); UNFAIR_IP=$(prompt_default "Unfair STA IP" "$UNFAIR_IP");;
-      3) RATES=$(prompt_default "Rates comma-separated" "$RATES"); DURATION=$(prompt_default "Duration seconds" "$DURATION"); FIXED_RATE_DEFAULT=$(prompt_default "Default fixed rate" "$FIXED_RATE_DEFAULT");;
+      3) RATES=$(prompt_default "Rates comma-separated" "$RATES"); DURATION=$(prompt_default "Duration seconds" "$DURATION"); FIXED_RATE_DEFAULT=$(prompt_default "Default fixed rate" "$FIXED_RATE_DEFAULT"); DUAL_FAIR_LEAD_SECONDS=$(prompt_default "Dual tests: seconds to start fair STA before unfair STA" "$DUAL_FAIR_LEAD_SECONDS");;
       4) local nodes; nodes=$(prompt_default "Nodes comma-separated" "$(all_nodes_csv_or_empty)"); run_action "load image" load_image_to_nodes "$nodes"; pause;;
       5) local node; node=$(prompt_default "Single node to image" "$UNFAIR_NODE"); run_action "load image on one node: $node" load_image_to_nodes "$node"; pause;;
       6) local nodes p; nodes=$(prompt_default "Nodes comma-separated" "$(all_nodes_csv_or_empty)"); p=$(prompt_default "Patch file" "$PATCH_FILE"); run_action "send patch + build/install" deploy_patch_and_build_nodes "$nodes" "$p"; pause;;
@@ -849,8 +916,8 @@ driver_options_menu() {
     echo "2) set unfair STA ath9k_hw options (raw string)"
     echo "3) baseline preset for both STAs"
     echo "4) selfish preset: fair=0, unfair=1"
-    echo "5) prompt/toggle fair options (selfish/disable_backoff/chanel_idle)"
-    echo "6) prompt/toggle unfair options (selfish/disable_backoff/chanel_idle)"
+    echo "5) prompt/toggle fair options (selfish/disable_backoff/chanel_idle/selfish_txop_us)"
+    echo "6) prompt/toggle unfair options (selfish/disable_backoff/chanel_idle/selfish_txop_us)"
     echo "7) unfair disable_backoff preset"
     echo "8) unfair chanel_idle preset"
     echo "9) unfair disable_backoff + chanel_idle preset"
@@ -861,13 +928,13 @@ driver_options_menu() {
     case "$c" in
       1) FAIR_DRIVER_OPTS=$(prompt_default "Fair ath9k_hw module options" "$FAIR_DRIVER_OPTS");;
       2) UNFAIR_DRIVER_OPTS=$(prompt_default "Unfair ath9k_hw module options" "$UNFAIR_DRIVER_OPTS");;
-      3) FAIR_DRIVER_OPTS="selfish_mode=0 disable_backoff=0 chanel_idle=0"; UNFAIR_DRIVER_OPTS="selfish_mode=0 disable_backoff=0 chanel_idle=0"; echo "Preset applied."; sleep 1;;
-      4) FAIR_DRIVER_OPTS="selfish_mode=0 disable_backoff=0 chanel_idle=0"; UNFAIR_DRIVER_OPTS="selfish_mode=1 disable_backoff=0 chanel_idle=0"; echo "Preset applied."; sleep 1;;
+      3) FAIR_DRIVER_OPTS="selfish_mode=0 disable_backoff=0 chanel_idle=0 selfish_txop_us=0"; UNFAIR_DRIVER_OPTS="selfish_mode=0 disable_backoff=0 chanel_idle=0 selfish_txop_us=0"; echo "Preset applied."; sleep 1;;
+      4) FAIR_DRIVER_OPTS="selfish_mode=0 disable_backoff=0 chanel_idle=0 selfish_txop_us=0"; UNFAIR_DRIVER_OPTS="selfish_mode=1 disable_backoff=0 chanel_idle=0 selfish_txop_us=0"; echo "Preset applied."; sleep 1;;
       5) FAIR_DRIVER_OPTS=$(compose_driver_opts_prompt "fair STA" "$FAIR_DRIVER_OPTS");;
       6) UNFAIR_DRIVER_OPTS=$(compose_driver_opts_prompt "unfair STA" "$UNFAIR_DRIVER_OPTS");;
-      7) FAIR_DRIVER_OPTS="selfish_mode=0 disable_backoff=0 chanel_idle=0"; UNFAIR_DRIVER_OPTS="selfish_mode=1 disable_backoff=1 chanel_idle=0"; echo "Preset applied."; sleep 1;;
-      8) FAIR_DRIVER_OPTS="selfish_mode=0 disable_backoff=0 chanel_idle=0"; UNFAIR_DRIVER_OPTS="selfish_mode=1 disable_backoff=0 chanel_idle=1"; echo "Preset applied."; sleep 1;;
-      9) FAIR_DRIVER_OPTS="selfish_mode=0 disable_backoff=0 chanel_idle=0"; UNFAIR_DRIVER_OPTS="selfish_mode=1 disable_backoff=1 chanel_idle=1"; echo "Preset applied."; sleep 1;;
+      7) FAIR_DRIVER_OPTS="selfish_mode=0 disable_backoff=0 chanel_idle=0 selfish_txop_us=0"; UNFAIR_DRIVER_OPTS="selfish_mode=1 disable_backoff=1 chanel_idle=0 selfish_txop_us=0"; echo "Preset applied."; sleep 1;;
+      8) FAIR_DRIVER_OPTS="selfish_mode=0 disable_backoff=0 chanel_idle=0 selfish_txop_us=0"; UNFAIR_DRIVER_OPTS="selfish_mode=1 disable_backoff=0 chanel_idle=1 selfish_txop_us=0"; echo "Preset applied."; sleep 1;;
+      9) FAIR_DRIVER_OPTS="selfish_mode=0 disable_backoff=0 chanel_idle=0 selfish_txop_us=0"; UNFAIR_DRIVER_OPTS="selfish_mode=1 disable_backoff=1 chanel_idle=1 selfish_txop_us=0"; echo "Preset applied."; sleep 1;;
       10) run_action "load drivers" prepare_topology "$UNFAIR_DRIVER_OPTS" "$FAIR_DRIVER_OPTS" "n"; pause;;
       11) run_action "status" status_nodes "$(all_nodes_csv_or_empty)"; pause;;
       b|B) return 0;;
@@ -896,7 +963,7 @@ test_menu() {
         duration=$(prompt_default "Duration seconds per rate" "$DURATION")
         prefix=$(prompt_default "Log prefix" "unfair_only_$(ts)_unfair_$(join_opts_tag "$UNFAIR_DRIVER_OPTS")")
         if prompt_yes_no "Prepare AP + unfair STA before test?" "y"; then
-          load_driver_on_node "$AP_NODE" "selfish_mode=0 disable_backoff=0 chanel_idle=0" && load_driver_on_node "$UNFAIR_NODE" "$UNFAIR_DRIVER_OPTS" && start_ap "n" && connect_sta "$UNFAIR_NODE" "$UNFAIR_IP"
+          load_driver_on_node "$AP_NODE" "selfish_mode=0 disable_backoff=0 chanel_idle=0 selfish_txop_us=0" && load_driver_on_node "$UNFAIR_NODE" "$UNFAIR_DRIVER_OPTS" && start_ap "n" && connect_sta "$UNFAIR_NODE" "$UNFAIR_IP"
         fi
         run_action "unfair node only" run_single_sta_sweep "unfair" "udp" "$rates" "$duration" "$prefix"; pause;;
       2)
@@ -905,13 +972,13 @@ test_menu() {
         duration=$(prompt_default "Duration seconds per rate" "$DURATION")
         prefix=$(prompt_default "Log prefix" "fair_only_$(ts)_fair_$(join_opts_tag "$FAIR_DRIVER_OPTS")")
         if prompt_yes_no "Prepare AP + fair STA before test?" "y"; then
-          load_driver_on_node "$AP_NODE" "selfish_mode=0 disable_backoff=0 chanel_idle=0" && load_driver_on_node "$FAIR_NODE" "$FAIR_DRIVER_OPTS" && start_ap "n" && connect_sta "$FAIR_NODE" "$FAIR_IP"
+          load_driver_on_node "$AP_NODE" "selfish_mode=0 disable_backoff=0 chanel_idle=0 selfish_txop_us=0" && load_driver_on_node "$FAIR_NODE" "$FAIR_DRIVER_OPTS" && start_ap "n" && connect_sta "$FAIR_NODE" "$FAIR_IP"
         fi
         run_action "fair node only" run_single_sta_sweep "fair" "udp" "$rates" "$duration" "$prefix"; pause;;
       3)
         run_action "UDP fair/unfair simultaneous" run_dual_test_with_plan "fair_unfair_udp" "udp" "$FAIR_DRIVER_OPTS" "$UNFAIR_DRIVER_OPTS" "n"; pause;;
       4)
-        run_action "only fair nodes" run_dual_test_with_plan "only_fair_nodes" "udp" "selfish_mode=0 disable_backoff=0 chanel_idle=0" "selfish_mode=0 disable_backoff=0 chanel_idle=0" "n"; pause;;
+        run_action "only fair nodes" run_dual_test_with_plan "only_fair_nodes" "udp" "selfish_mode=0 disable_backoff=0 chanel_idle=0 selfish_txop_us=0" "selfish_mode=0 disable_backoff=0 chanel_idle=0 selfish_txop_us=0" "n"; pause;;
       5)
         run_action "TCP fair/unfair" run_dual_test_with_plan "tcp" "tcp" "$FAIR_DRIVER_OPTS" "$UNFAIR_DRIVER_OPTS" "n"; pause;;
       6)
@@ -994,7 +1061,7 @@ EOF
 
 cmd="${1:-menu}"; [[ $# -gt 0 ]] && shift || true
 case "$cmd" in
-  menu|interactive) main_menu;;
+  menu|interactive) load_default_config_if_present; main_menu;;
   generate-patch) generate_patch "${1:-$PATCH_FILE}";;
   load-config) load_config "${1:?config file required}";;
   export-config) export_config "${1:?config file required}";;
