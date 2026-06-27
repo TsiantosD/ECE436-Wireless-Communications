@@ -30,6 +30,9 @@
 #include "ar9003_phy.h"
 #include "ath9k.h"
 
+extern bool disable_backoff;
+extern bool chanel_idle;
+
 static bool ath9k_hw_set_reset_reg(struct ath_hw *ah, u32 type);
 
 MODULE_AUTHOR("Atheros Communications");
@@ -1159,7 +1162,7 @@ void ath9k_hw_init_global_settings(struct ath_hw *ah)
 
 	if (chanel_idle) {
 		REG_SET_BIT(ah, AR_DIAG_SW, AR_DIAG_FORCE_CH_IDLE_HIGH);
-		printk(KERN_INFO "ath9k: made chanel idle all times!!!!")
+		printk(KERN_INFO "ath9k: made channel idle all times!!!!");
 	}
 
 	if (disable_backoff) {

@@ -24,6 +24,16 @@ module_param(selfish_mode, bool, 0644);
 MODULE_PARM_DESC(selfish_mode,
 	"Disable CSMA/CA: CW=0, AIFS=1, ignore CCA (not yet)");
 
+bool disable_backoff = false;
+module_param(disable_backoff, bool, 0644);
+MODULE_PARM_DESC(disable_backoff,
+	"disable backoff via AR_D_GBL_IFS_MISC_IGNORE_BACKOFF");
+
+bool chanel_idle = false;
+module_param(chanel_idle, bool, 0644);
+MODULE_PARM_DESC(chanel_idle,
+	"force channel idle via AR_DIAG_FORCE_CH_IDLE_HIGH");
+
 static void ath9k_hw_set_txq_interrupts(struct ath_hw *ah,
 					struct ath9k_tx_queue_info *qi)
 {
@@ -166,8 +176,10 @@ void ath9k_hw_abort_tx_dma(struct ath_hw *ah)
 	}
 
 	REG_CLR_BIT(ah, AR_PCU_MISC, AR_PCU_FORCE_QUIET_COLL | AR_PCU_CLEAR_VMF);
-	// REG_CLR_BIT(ah, AR_DIAG_SW, AR_DIAG_FORCE_CH_IDLE_HIGH);
-	// REG_CLR_BIT(ah, AR_D_GBL_IFS_MISC, AR_D_GBL_IFS_MISC_IGNORE_BACKOFF);
+	if (!chanel_idle)
+		REG_CLR_BIT(ah, AR_DIAG_SW, AR_DIAG_FORCE_CH_IDLE_HIGH);
+	if (!disable_backoff)
+		REG_CLR_BIT(ah, AR_D_GBL_IFS_MISC, AR_D_GBL_IFS_MISC_IGNORE_BACKOFF);
 
 	REG_WRITE(ah, AR_Q_TXD, 0);
 }
