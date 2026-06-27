@@ -6,6 +6,7 @@
 .tmp_versions/
 Module.symvers
 modules.order
+__pycache__/
 
 # Experiment outputs
 results/
