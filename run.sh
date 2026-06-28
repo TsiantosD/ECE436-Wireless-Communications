@@ -1143,28 +1143,102 @@ plot_results() {
   local indir="$1" csv="${2:-$indir/summary.csv}" outdir="${3:-$PLOTS_DIR/$(basename "$indir")}" 
   [[ -f "$csv" ]] || parse_results "$indir" "$csv"
   python3 - "$csv" "$outdir" "$FAIR_PORT" "$UNFAIR_PORT" <<'PY'
-import csv, re, sys
+import csv, re, sys, warnings
 from collections import defaultdict
 from pathlib import Path
 csv_path=Path(sys.argv[1]); outdir=Path(sys.argv[2]); fair_port=sys.argv[3]; unfair_port=sys.argv[4]
+experiment_dir = csv_path.parent
 outdir.mkdir(parents=True, exist_ok=True)
 try:
+    warnings.filterwarnings('ignore', message='Unable to import Axes3D.*')
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 except Exception:
     plt = None
 
+def parse_shell_value(raw):
+    raw = (raw or '').strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in ('"', "'"):
+        return raw[1:-1]
+    # config_content writes with printf %q, so spaces usually appear as \ .
+    return raw.replace('\\ ', ' ')
+
+def read_unfair_driver_options(exp_dir):
+    conf = exp_dir / 'experiment.conf'
+    if not conf.is_file():
+        return ''
+    for line in conf.read_text(errors='replace').splitlines():
+        if line.startswith('UNFAIR_DRIVER_OPTS='):
+            return parse_shell_value(line.split('=', 1)[1])
+    return ''
+
+def active_driver_caption(opts):
+    opts = (opts or '').strip()
+    if not opts:
+        return ''
+    tokens = opts.split()
+    active = []
+    for token in tokens:
+        if '=' not in token:
+            active.append(token)
+            continue
+        key, value = token.split('=', 1)
+        if value.lower() not in ('0', 'n', 'no', 'false', 'off'):
+            active.append(f'{key}={value}')
+    if active:
+        return 'Unfair driver options: ' + ', '.join(active)
+    return 'Unfair driver options: default/off (' + opts + ')'
+
+unfair_driver_caption = active_driver_caption(read_unfair_driver_options(experiment_dir))
+
 def write_basic_png(path, title, label_series):
     # Pure-stdlib fallback for environments without matplotlib.  It keeps the
     # same PNG filename and draws the actual time-shifted series instead of a
     # placeholder, so old PNGs are not left stale.
     import struct, zlib
-    W,H=1000,500; L,R,T,B=70,30,35,55
+    W,H=1000,560; L,R,T,B=70,30,45,95
     img=bytearray([255]*(W*H*3))
     def pix(x,y,c):
         if 0 <= x < W and 0 <= y < H:
             i=(y*W+x)*3; img[i:i+3]=bytes(c)
+    font={
+        'A':['01110','10001','10001','11111','10001','10001','10001'], 'B':['11110','10001','10001','11110','10001','10001','11110'],
+        'C':['01111','10000','10000','10000','10000','10000','01111'], 'D':['11110','10001','10001','10001','10001','10001','11110'],
+        'E':['11111','10000','10000','11110','10000','10000','11111'], 'F':['11111','10000','10000','11110','10000','10000','10000'],
+        'G':['01111','10000','10000','10011','10001','10001','01110'], 'H':['10001','10001','10001','11111','10001','10001','10001'],
+        'I':['11111','00100','00100','00100','00100','00100','11111'], 'J':['00111','00010','00010','00010','00010','10010','01100'],
+        'K':['10001','10010','10100','11000','10100','10010','10001'], 'L':['10000','10000','10000','10000','10000','10000','11111'],
+        'M':['10001','11011','10101','10101','10001','10001','10001'], 'N':['10001','11001','10101','10011','10001','10001','10001'],
+        'O':['01110','10001','10001','10001','10001','10001','01110'], 'P':['11110','10001','10001','11110','10000','10000','10000'],
+        'Q':['01110','10001','10001','10001','10101','10010','01101'], 'R':['11110','10001','10001','11110','10100','10010','10001'],
+        'S':['01111','10000','10000','01110','00001','00001','11110'], 'T':['11111','00100','00100','00100','00100','00100','00100'],
+        'U':['10001','10001','10001','10001','10001','10001','01110'], 'V':['10001','10001','10001','10001','01010','01010','00100'],
+        'W':['10001','10001','10001','10101','10101','10101','01010'], 'X':['10001','01010','00100','00100','00100','01010','10001'],
+        'Y':['10001','01010','00100','00100','00100','00100','00100'], 'Z':['11111','00001','00010','00100','01000','10000','11111'],
+        '0':['01110','10001','10011','10101','11001','10001','01110'], '1':['00100','01100','00100','00100','00100','00100','01110'],
+        '2':['01110','10001','00001','00010','00100','01000','11111'], '3':['11110','00001','00001','01110','00001','00001','11110'],
+        '4':['00010','00110','01010','10010','11111','00010','00010'], '5':['11111','10000','10000','11110','00001','00001','11110'],
+        '6':['01110','10000','10000','11110','10001','10001','01110'], '7':['11111','00001','00010','00100','01000','01000','01000'],
+        '8':['01110','10001','10001','01110','10001','10001','01110'], '9':['01110','10001','10001','01111','00001','00001','01110'],
+        ' ':['00000']*7, ':':['00000','00100','00100','00000','00100','00100','00000'], '=':['00000','00000','11111','00000','11111','00000','00000'],
+        ',':['00000','00000','00000','00000','00100','00100','01000'], '.':['00000','00000','00000','00000','00000','00100','00100'],
+        '_':['00000','00000','00000','00000','00000','00000','11111'], '-':['00000','00000','00000','11111','00000','00000','00000'],
+        '/':['00001','00010','00010','00100','01000','01000','10000'], '(':['00010','00100','01000','01000','01000','00100','00010'],
+        ')':['01000','00100','00010','00010','00010','00100','01000']
+    }
+    def draw_text(x,y,text,c=(0,0,0),scale=2):
+        x0=x
+        for ch in str(text).upper():
+            glyph=font.get(ch, font.get(' '))
+            for gy,row in enumerate(glyph):
+                for gx,on in enumerate(row):
+                    if on == '1':
+                        for yy in range(scale):
+                            for xx in range(scale): pix(x+gx*scale+xx, y+gy*scale+yy, c)
+            x += 6*scale
+            if x > W-20:
+                y += 9*scale; x = x0
     def line(x0,y0,x1,y1,c):
         x0=int(round(x0)); y0=int(round(y0)); x1=int(round(x1)); y1=int(round(y1))
         dx=abs(x1-x0); sx=1 if x0<x1 else -1; dy=-abs(y1-y0); sy=1 if y0<y1 else -1; err=dx+dy
@@ -1199,6 +1273,10 @@ def write_basic_png(path, title, label_series):
             last=(px,py)
         # small color-box legend (text is available in matplotlib path only)
         rect(W-R-150, T+idx*18, W-R-135, T+idx*18+10, c)
+        draw_text(W-R-130, T+idx*18-1, name, c, scale=1)
+    draw_text(L, 12, title, (0,0,0), scale=2)
+    if unfair_driver_caption:
+        draw_text(L, H-38, unfair_driver_caption, (0,0,0), scale=1)
     raw=b''.join(b'\x00'+bytes(img[y*W*3:(y+1)*W*3]) for y in range(H))
     def chunk(t,d): return struct.pack('>I',len(d))+t+d+struct.pack('>I',zlib.crc32(t+d)&0xffffffff)
     png=b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',W,H,8,2,0,0,0))+chunk(b'IDAT',zlib.compress(raw,9))+chunk(b'IEND',b'')
@@ -1251,10 +1329,40 @@ for unfair, fair in pairs:
             xs=[p[0] for p in pts]; ys=[p[1] for p in pts]
             plt.plot(xs, ys, marker='o', linewidth=1.4, label=name)
         plt.title(title); plt.xlabel('time (s)'); plt.ylabel('receiver bandwidth (Mbit/s)')
-        plt.grid(True, alpha=0.3); plt.legend(); plt.tight_layout(); plt.savefig(path, dpi=140); plt.close()
+        plt.grid(True, alpha=0.3); plt.legend()
+        if unfair_driver_caption:
+            plt.figtext(0.5, 0.015, unfair_driver_caption, ha='center', va='bottom', fontsize=8, wrap=True)
+            plt.tight_layout(rect=(0, 0.06, 1, 1))
+        else:
+            plt.tight_layout()
+        plt.savefig(path, dpi=140); plt.close()
     print(path); made+=1
 print(f'Wrote {made} plots to {outdir}')
 PY
+}
+
+find_child_summary_csvs() {
+  local indir="$1"
+  [[ -d "$indir" ]] || return 0
+  find "$indir" -mindepth 2 -maxdepth 3 -type f -name summary.csv | sort
+}
+
+plot_results_auto() {
+  local indir="$1" csv="${2:-$indir/summary.csv}" outroot="${3:-$PLOTS_DIR}" summaries=() summary exp_dir dest made=0
+  [[ -d "$indir" ]] || { echo "Input directory not found: $indir" >&2; return 1; }
+  mapfile -t summaries < <(find_child_summary_csvs "$indir")
+  if (( ${#summaries[@]} )); then
+    echo "Found ${#summaries[@]} experiment summary file(s) under: $indir"
+    for summary in "${summaries[@]}"; do
+      exp_dir="$(dirname "$summary")"
+      dest="$outroot/$(basename "$exp_dir")"
+      plot_results "$exp_dir" "$summary" "$dest"
+      ((made+=1))
+    done
+    echo "Plotted $made experiment(s) under: $outroot"
+  else
+    plot_results "$indir" "$csv" "$outroot"
+  fi
 }
 
 dry_run_results() {
@@ -1296,7 +1404,11 @@ pairs=[('25M','5M'), ('25M','10M'), ('50M','10M')]
 for node in (ap, fair, unfair):
     setup=raw/node/exp/'setup'
     setup.mkdir(parents=True, exist_ok=True)
-    (raw/node/exp/'experiment.conf').write_text(f'# dry-run config snapshot for {exp}\nAP_NODE={ap}\nFAIR_NODE={fair}\nUNFAIR_NODE={unfair}\n')
+    (raw/node/exp/'experiment.conf').write_text(
+        f'# dry-run config snapshot for {exp}\n'
+        f'AP_NODE={ap}\nFAIR_NODE={fair}\nUNFAIR_NODE={unfair}\n'
+        'UNFAIR_DRIVER_OPTS=selfish_mode=1\\ disable_backoff=1\\ chanel_idle=0\\ selfish_txop_us=0\n'
+    )
     (setup/f'{node}_dryrun_setup.log').write_text(f'dummy setup for {node}\n')
 for idx,(unfair_rate,fair_rate) in enumerate(pairs):
     run_stamp=f"{stamp}_{idx+1:02d}"
@@ -1438,7 +1550,7 @@ results_menu() {
     case "$c" in
       1) local out nodes; out=$(prompt_default "Local output dir" "$LOCAL_RESULTS_DIR/collected_$(ts)"); nodes=$(prompt_default "Nodes comma-separated" "$(all_nodes_csv_or_empty)"); run_action "fetch results" fetch_results "$out" "$nodes"; pause;;
       2) local dir csv; dir=$(prompt_default "Experiment log dir" "$LOCAL_RESULTS_DIR"); csv=$(prompt_default "CSV output" "$dir/summary.csv"); run_action "parse results" parse_results "$dir" "$csv"; pause;;
-      3) local dir csv out; dir=$(prompt_default "Experiment log dir" "$LOCAL_RESULTS_DIR"); csv=$(prompt_default "CSV file" "$dir/summary.csv"); out=$(prompt_default "Plot output dir" "$PLOTS_DIR/$(basename "$dir")"); run_action "plot results" plot_results "$dir" "$csv" "$out"; pause;;
+      3) local dir csv out; dir=$(prompt_default "Experiment/collection log dir" "$LOCAL_RESULTS_DIR"); csv=$(prompt_default "CSV file (used only for a single experiment dir)" "$dir/summary.csv"); out=$(prompt_default "Plot output root" "$PLOTS_DIR"); run_action "plot results" plot_results_auto "$dir" "$csv" "$out"; pause;;
       4) local dir csv out; dir=$(prompt_default "Experiment log dir" "$LOCAL_RESULTS_DIR"); csv=$(prompt_default "CSV output" "$dir/summary.csv"); out=$(prompt_default "Plot output dir" "$PLOTS_DIR/$(basename "$dir")"); run_action "parse results" parse_results "$dir" "$csv"; run_action "plot results" plot_results "$dir" "$csv" "$out"; pause;;
       5) local out; out=$(prompt_default "Dry-run collected output dir" "$LOCAL_RESULTS_DIR/collected_$(ts)_dryrun"); run_action "dry-run dummy results" dry_run_results "$out"; pause;;
       b|B) return 0;;
@@ -1505,7 +1617,7 @@ case "$cmd" in
   deploy-driver) deploy_patch_and_build_nodes "${1:-}" "${2:-$PATCH_FILE}";;
   fetch-results) fetch_results "${1:-$LOCAL_RESULTS_DIR/collected_$(ts)}" "${2:-}";;
   parse-results) parse_results "${1:?experiment dir required}" "${2:-${1:?}/summary.csv}";;
-  plot-results) plot_results "${1:?experiment dir required}" "${2:-${1:?}/summary.csv}" "${3:-$PLOTS_DIR/$(basename "${1:?}")}";;
+  plot-results) plot_results_auto "${1:?experiment dir required}" "${2:-${1:?}/summary.csv}" "${3:-$PLOTS_DIR}";;
   dry-run|dryrun) dry_run_results "${1:-$LOCAL_RESULTS_DIR/collected_$(ts)_dryrun}";;
   status) status_nodes "${1:-}";;
   -h|--help|help) usage;;
