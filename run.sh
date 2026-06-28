@@ -41,6 +41,15 @@ RATES="${RATES:-5M,25M,50M,150M}"
 DURATION="${DURATION:-60}"
 FIXED_RATE_DEFAULT="${FIXED_RATE_DEFAULT:-150M}"
 DUAL_FAIR_LEAD_SECONDS="${DUAL_FAIR_LEAD_SECONDS:-10}"
+CHANNEL_SWITCH_ENABLED="${CHANNEL_SWITCH_ENABLED:-0}"
+CHANNEL_SWITCH_DELAY_SECONDS="${CHANNEL_SWITCH_DELAY_SECONDS:-30}"
+CHANNEL_SWITCH_CHANNEL="${CHANNEL_SWITCH_CHANNEL:-6}"
+AP2_FOLLOW_ENABLED="${AP2_FOLLOW_ENABLED:-0}"
+AP2_FOLLOW_PORT="${AP2_FOLLOW_PORT:-4444}"
+AP2_FOLLOW_CHANNELS="${AP2_FOLLOW_CHANNELS:-1-11}"
+AP2_FOLLOW_DWELL_SECONDS="${AP2_FOLLOW_DWELL_SECONDS:-0.35}"
+AP2_FOLLOW_TARGET_SSID="${AP2_FOLLOW_TARGET_SSID:-$SSID}"
+AP2_FOLLOW_IGNORE_SSID="${AP2_FOLLOW_IGNORE_SSID:-$AP2_SSID}"
 
 # Driver module options passed to ath9k_hw. Keep every known custom option
 # explicit in labels/configs so result directories document the exact mode.
@@ -100,6 +109,20 @@ ts() { date +%Y%m%d_%H%M%S; }
 safe() { sed 's/[^A-Za-z0-9_.-]/_/g' <<<"$1"; }
 join_opts_tag() { local x="${1:-none}"; x="${x// /_}"; safe "$x"; }
 rate_tag() { safe "$1"; }
+
+channel_to_freq_mhz() {
+  local channel="$1"
+  if [[ "$channel" =~ ^[0-9]+$ ]] && (( channel > 1000 )); then
+    printf '%s' "$channel"
+  elif [[ "$channel" == "14" ]]; then
+    printf '2484'
+  elif [[ "$channel" =~ ^[0-9]+$ ]] && (( channel >= 1 && channel <= 13 )); then
+    printf '%s' $((2407 + 5 * channel))
+  else
+    echo "Unsupported channel/frequency: $channel (use 2.4GHz channel 1-14 or frequency MHz)" >&2
+    return 1
+  fi
+}
 
 script_path() {
   local path="$1"
@@ -264,6 +287,8 @@ Unfair STA:        ${UNFAIR_NODE:-<unset>} ($UNFAIR_IP)
 Channel:           $CHANNEL
 Default rates:     $RATES
 Duration:          ${DURATION}s
+CSA switch:        enabled=$CHANNEL_SWITCH_ENABLED delay=${CHANNEL_SWITCH_DELAY_SECONDS}s channel=$CHANNEL_SWITCH_CHANNEL
+AP2 follow:        enabled=$AP2_FOLLOW_ENABLED port=$AP2_FOLLOW_PORT channels=$AP2_FOLLOW_CHANNELS dwell=${AP2_FOLLOW_DWELL_SECONDS}s target_ssid=$AP2_FOLLOW_TARGET_SSID ignore_ssid=$AP2_FOLLOW_IGNORE_SSID
 Fair driver opts:  ${FAIR_DRIVER_OPTS:-<none>}
 Unfair drv opts:   ${UNFAIR_DRIVER_OPTS:-<none>}
 EOF
@@ -292,6 +317,8 @@ run_action() {
 config_keys=(
   GATEWAY SLICE_NAME IMAGE BACKPORTS_DIR NODE_LOG_DIR LOCAL_RESULTS_DIR PLOTS_DIR PATCH_FILE SRC_REPO BASE_REF
   AP_NODE AP2_NODE FAIR_NODE UNFAIR_NODE AP_IP AP2_IP FAIR_IP UNFAIR_IP SSID AP2_SSID CHANNEL RATES DURATION FIXED_RATE_DEFAULT DUAL_FAIR_LEAD_SECONDS
+  CHANNEL_SWITCH_ENABLED CHANNEL_SWITCH_DELAY_SECONDS CHANNEL_SWITCH_CHANNEL
+  AP2_FOLLOW_ENABLED AP2_FOLLOW_PORT AP2_FOLLOW_CHANNELS AP2_FOLLOW_DWELL_SECONDS AP2_FOLLOW_TARGET_SSID AP2_FOLLOW_IGNORE_SSID
   FAIR_DRIVER_OPTS UNFAIR_DRIVER_OPTS FAIR_PORT UNFAIR_PORT TCP_PORT_BASE
 )
 
@@ -532,9 +559,12 @@ if ! command -v hostapd >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
   apt install -y hostapd
 fi
+mkdir -p /var/run/hostapd
 cat > /root/ece436_ap.conf <<EOF_AP
 interface=wlan0
 driver=nl80211
+ctrl_interface=/var/run/hostapd
+ctrl_interface_group=0
 ssid=$ssid
 hw_mode=$hw_mode
 channel=$CHANNEL
@@ -693,6 +723,101 @@ fi
 "
 }
 
+schedule_ap_channel_switch() {
+  local ap_node="$1" delay_seconds="$2" channel="$3" label="$4"
+  local freq
+  freq="$(channel_to_freq_mhz "$channel")" || return 1
+  node_bash "$ap_node" "
+set -euo pipefail
+mkdir -p '$NODE_LOG_DIR/$label'
+{
+  echo '[csa] scheduled AP channel switch'
+  echo date_scheduled=\$(date -Is)
+  echo 'ap_node=$ap_node'
+  echo 'delay_seconds=$delay_seconds'
+  echo 'target_channel=$channel'
+  echo 'target_frequency_mhz=$freq'
+  sleep '$delay_seconds'
+  echo date_before_switch=\$(date -Is)
+  hostapd_cli -p /var/run/hostapd -i wlan0 status || true
+  echo '[csa] command: hostapd_cli -p /var/run/hostapd -i wlan0 chan_switch 5 $freq'
+  hostapd_cli -p /var/run/hostapd -i wlan0 chan_switch 5 '$freq'
+  sleep 2
+  echo date_after_switch=\$(date -Is)
+  hostapd_cli -p /var/run/hostapd -i wlan0 status || true
+  iw dev wlan0 info || true
+  dmesg 2>/dev/null | grep -iE 'ath9k|cfg80211|nl80211|channel|csa|switch' | tail -80 || true
+} 2>&1 | tee '$NODE_LOG_DIR/$label/${ap_node}_channel_switch_ch${channel}_after${delay_seconds}s.log'
+"
+
+}
+
+copy_python_script_to_node() {
+  local node="$1"
+  local script_name="$2"
+  local local_path="$SCRIPT_DIR/$script_name"
+  local remote_path="/root/$script_name"
+  [[ -s "$local_path" ]] || { echo "Python script not found: $local_path" >&2; return 1; }
+  echo "[copy] $script_name -> $node:$remote_path"
+  scp "${SSH_OPTS[@]}" "$local_path" "$(gateway_target):/tmp/$script_name"
+  gw "scp -o StrictHostKeyChecking=no '/tmp/$script_name' root@'$node':'$remote_path' && ssh -o StrictHostKeyChecking=no root@'$node' 'chmod +x $remote_path'"
+}
+
+start_ap2_channel_follow() {
+  require_two_ap_nodes_config || return 1
+  local label="$1"
+  copy_python_script_to_node "$AP2_NODE" "ap_channel_switch_server.py" || return 1
+  copy_python_script_to_node "$UNFAIR_NODE" "unfair_beacon_channel_hunter.py" || return 1
+
+  echo "[ap2-follow] starting AP2 UDP hostapd_cli listener on $AP2_NODE:$AP2_FOLLOW_PORT"
+  node_bash "$AP2_NODE" "
+set -euo pipefail
+mkdir -p '$NODE_LOG_DIR/$label'
+if [[ -f '$NODE_LOG_DIR/ap2_channel_switch_server.pid' ]]; then
+  old_pid=\$(cat '$NODE_LOG_DIR/ap2_channel_switch_server.pid' 2>/dev/null || true)
+  [[ -n \"\${old_pid:-}\" ]] && kill \"\$old_pid\" 2>/dev/null || true
+fi
+nohup python3 /root/ap_channel_switch_server.py --bind 0.0.0.0 --port '$AP2_FOLLOW_PORT' --iface wlan0 \
+  > '$NODE_LOG_DIR/$label/${AP2_NODE}_ap2_channel_switch_server.log' 2>&1 & echo \$! > '$NODE_LOG_DIR/ap2_channel_switch_server.pid'
+sleep 1
+cat '$NODE_LOG_DIR/ap2_channel_switch_server.pid'
+tail -20 '$NODE_LOG_DIR/$label/${AP2_NODE}_ap2_channel_switch_server.log' || true
+"
+
+  echo "[ap2-follow] preparing mon1 and starting beacon hunter on $UNFAIR_NODE"
+  node_bash "$UNFAIR_NODE" "
+set -euo pipefail
+mkdir -p '$NODE_LOG_DIR/$label'
+export DEBIAN_FRONTEND=noninteractive
+if ! python3 -c 'import scapy.all' >/dev/null 2>&1; then
+  echo '[ap2-follow] installing python3-scapy'
+  apt install -y python3-scapy
+fi
+if iw dev mon1 info >/dev/null 2>&1; then
+  ip link set mon1 down 2>/dev/null || true
+else
+  iw dev wlan0 interface add mon1 type monitor
+fi
+ip link set mon1 up 2>/dev/null || ifconfig mon1 up
+if [[ -f '$NODE_LOG_DIR/unfair_beacon_channel_hunter.pid' ]]; then
+  old_pid=\$(cat '$NODE_LOG_DIR/unfair_beacon_channel_hunter.pid' 2>/dev/null || true)
+  [[ -n \"\${old_pid:-}\" ]] && kill \"\$old_pid\" 2>/dev/null || true
+fi
+nohup python3 /root/unfair_beacon_channel_hunter.py \
+  --monitor-iface mon1 \
+  --ap-control-ip '$AP2_IP' \
+  --ap-control-port '$AP2_FOLLOW_PORT' \
+  --channels '$AP2_FOLLOW_CHANNELS' \
+  --dwell-seconds '$AP2_FOLLOW_DWELL_SECONDS' \
+  --target-ssid '$AP2_FOLLOW_TARGET_SSID' \
+  --ignore-ssid '$AP2_FOLLOW_IGNORE_SSID' \
+  > '$NODE_LOG_DIR/$label/${UNFAIR_NODE}_unfair_beacon_channel_hunter.log' 2>&1 & echo \$! > '$NODE_LOG_DIR/unfair_beacon_channel_hunter.pid'
+sleep 1
+cat '$NODE_LOG_DIR/unfair_beacon_channel_hunter.pid'
+tail -30 '$NODE_LOG_DIR/$label/${UNFAIR_NODE}_unfair_beacon_channel_hunter.log' || true
+"
+}
+
 run_two_sta_once() {
   require_nodes_config || return 1
   local proto="$1" fair_rate="$2" unfair_rate="$3" duration="$4" label="$5" fair_lead_seconds="${6:-$DUAL_FAIR_LEAD_SECONDS}"
@@ -722,9 +847,24 @@ run_two_sta_once() {
 run_two_ap_once() {
   require_two_ap_nodes_config || return 1
   local proto="$1" fair_rate="$2" unfair_rate="$3" duration="$4" label="$5" fair_lead_seconds="${6:-$DUAL_FAIR_LEAD_SECONDS}"
+  local csa_enabled="${7:-0}" csa_delay="${8:-30}" csa_channel="${9:-6}" ap2_follow_enabled="${10:-0}" csa_pid=""
   if ! [[ "$fair_lead_seconds" =~ ^[0-9]+$ ]]; then
     echo "Invalid fair lead delay: $fair_lead_seconds (must be non-negative integer seconds)" >&2
     return 1
+  fi
+  if [[ "$csa_enabled" == "1" ]]; then
+    if ! [[ "$csa_delay" =~ ^[0-9]+$ ]]; then
+      echo "Invalid channel-switch delay: $csa_delay (must be non-negative integer seconds)" >&2
+      return 1
+    fi
+    channel_to_freq_mhz "$csa_channel" >/dev/null || return 1
+    if [[ "$duration" =~ ^[0-9]+$ ]] && (( csa_delay >= duration )); then
+      echo "[two-ap] WARNING: channel-switch delay (${csa_delay}s) is >= iperf duration (${duration}s); switch may occur after fair iperf finishes" >&2
+    fi
+  fi
+  if [[ "$ap2_follow_enabled" == "1" ]]; then
+    echo "[two-ap] enabling AP2 follow automation: AP2 listener + unfair-node beacon hunter"
+    start_ap2_channel_follow "$label" || return 1
   fi
   iperf_server "$AP_NODE" "$proto" "$FAIR_PORT" "$label" || return 1
   iperf_server "$AP2_NODE" "$proto" "$UNFAIR_PORT" "$label" || return 1
@@ -732,6 +872,11 @@ run_two_ap_once() {
   echo "[two-ap] starting fair STA toward AP1: node=$FAIR_NODE ap=$AP_NODE ip=$AP_IP rate=$fair_rate duration=${duration}s"
   iperf_client "$FAIR_NODE" "$proto" "$AP_IP" "$fair_rate" "$duration" "$FAIR_PORT" "$label" "fair" &
   local fair_pid=$!
+  if [[ "$csa_enabled" == "1" ]]; then
+    echo "[two-ap] scheduling AP1/fair CSA: ap=$AP_NODE delay=${csa_delay}s target_channel=$csa_channel"
+    schedule_ap_channel_switch "$AP_NODE" "$csa_delay" "$csa_channel" "$label" &
+    csa_pid=$!
+  fi
   if (( fair_lead_seconds > 0 )); then
     echo "[two-ap] waiting ${fair_lead_seconds}s before starting unfair STA toward AP2"
     sleep "$fair_lead_seconds"
@@ -742,6 +887,9 @@ run_two_ap_once() {
   local rc1=0 rc2=0
   wait "$fair_pid" || rc1=$?
   wait "$unfair_pid" || rc2=$?
+  if [[ -n "$csa_pid" ]]; then
+    wait "$csa_pid" || rc2=$?
+  fi
   [[ "$rc1" -eq 0 && "$rc2" -eq 0 ]]
 }
 
@@ -814,14 +962,33 @@ run_dual_sta_experiment() {
 }
 
 run_two_ap_experiment() {
-  local proto wifi_mode
+  local proto wifi_mode csa_enabled=0 csa_delay="$CHANNEL_SWITCH_DELAY_SECONDS" csa_channel="$CHANNEL_SWITCH_CHANNEL" ap2_follow_enabled=0
+  if prompt_yes_no "Enable scheduled channel switch on AP1/fair link during iperf?" "n"; then
+    csa_enabled=1
+    csa_delay=$(prompt_default "Seconds after fair iperf starts to switch AP1 channel" "$CHANNEL_SWITCH_DELAY_SECONDS")
+    csa_channel=$(prompt_default "Target AP1 channel" "$CHANNEL_SWITCH_CHANNEL")
+    channel_to_freq_mhz "$csa_channel" >/dev/null || return 1
+  fi
+  CHANNEL_SWITCH_ENABLED="$csa_enabled"
+  CHANNEL_SWITCH_DELAY_SECONDS="$csa_delay"
+  CHANNEL_SWITCH_CHANNEL="$csa_channel"
+  if prompt_yes_no "Enable AP2/unfair auto-follow with UDP + Scapy beacon hunter?" "$(bool_default_letter "$AP2_FOLLOW_ENABLED")"; then
+    ap2_follow_enabled=1
+    AP2_FOLLOW_PORT=$(prompt_default "AP2 follow UDP port" "$AP2_FOLLOW_PORT")
+    AP2_FOLLOW_CHANNELS=$(prompt_default "Unfair hunter channel sweep list" "$AP2_FOLLOW_CHANNELS")
+    AP2_FOLLOW_DWELL_SECONDS=$(prompt_default "Unfair hunter dwell seconds per channel (>0.1)" "$AP2_FOLLOW_DWELL_SECONDS")
+    AP2_FOLLOW_TARGET_SSID=$(prompt_default "Beacon target SSID to follow" "$AP2_FOLLOW_TARGET_SSID")
+    AP2_FOLLOW_IGNORE_SSID=$(prompt_default "SSID to ignore (usually AP2 own SSID)" "$AP2_FOLLOW_IGNORE_SSID")
+  fi
+  AP2_FOLLOW_ENABLED="$ap2_follow_enabled"
   proto=$(prompt_protocol)
   wifi_mode=$(prompt_wifi_mode)
-  run_two_ap_test_with_plan "two_ap_fair_unfair_${proto}_11${wifi_mode}" "$proto" "$FAIR_DRIVER_OPTS" "$UNFAIR_DRIVER_OPTS" "$wifi_mode"
+  run_two_ap_test_with_plan "two_ap_fair_unfair_${proto}_11${wifi_mode}" "$proto" "$FAIR_DRIVER_OPTS" "$UNFAIR_DRIVER_OPTS" "$wifi_mode" "$csa_enabled" "$csa_delay" "$csa_channel" "$ap2_follow_enabled"
 }
 
 run_dual_plan() {
   local test_name="$1" proto="$2" fair_opts="$3" unfair_opts="$4" wifi_mode="$5" topology_fn="$6" run_once_fn="$7"
+  local csa_enabled="${8:-0}" csa_delay="${9:-30}" csa_channel="${10:-6}" ap2_follow_enabled="${11:-0}"
   local duration prefix plan mode fixed_node fixed_rate sweep_rates rate fair_rate unfair_rate label fair_lead_seconds
   duration=$(prompt_default "Duration seconds per run" "$DURATION")
   fair_lead_seconds=$(prompt_default "Seconds to start fair STA before unfair STA" "$DUAL_FAIR_LEAD_SECONDS")
@@ -847,25 +1014,25 @@ run_dual_plan() {
     none)
       for rate in $(split_csv "$sweep_rates"); do
         label="${prefix}/unfair_$(rate_tag "$rate")_fair_$(rate_tag "$rate")_$(ts)_proto_${proto}_fairlead_${fair_lead_seconds}s"
-        "$run_once_fn" "$proto" "$rate" "$rate" "$duration" "$label" "$fair_lead_seconds" || return 1
+        "$run_once_fn" "$proto" "$rate" "$rate" "$duration" "$label" "$fair_lead_seconds" "$csa_enabled" "$csa_delay" "$csa_channel" "$ap2_follow_enabled" || return 1
       done
       ;;
     unfair)
       for rate in $(split_csv "$sweep_rates"); do
         label="${prefix}/unfair_$(rate_tag "$fixed_rate")_fair_$(rate_tag "$rate")_$(ts)_proto_${proto}_fairlead_${fair_lead_seconds}s"
-        "$run_once_fn" "$proto" "$rate" "$fixed_rate" "$duration" "$label" "$fair_lead_seconds" || return 1
+        "$run_once_fn" "$proto" "$rate" "$fixed_rate" "$duration" "$label" "$fair_lead_seconds" "$csa_enabled" "$csa_delay" "$csa_channel" "$ap2_follow_enabled" || return 1
       done
       ;;
     fair)
       for rate in $(split_csv "$sweep_rates"); do
         label="${prefix}/unfair_$(rate_tag "$rate")_fair_$(rate_tag "$fixed_rate")_$(ts)_proto_${proto}_fairlead_${fair_lead_seconds}s"
-        "$run_once_fn" "$proto" "$fixed_rate" "$rate" "$duration" "$label" "$fair_lead_seconds" || return 1
+        "$run_once_fn" "$proto" "$fixed_rate" "$rate" "$duration" "$label" "$fair_lead_seconds" "$csa_enabled" "$csa_delay" "$csa_channel" "$ap2_follow_enabled" || return 1
       done
       ;;
     both)
       IFS=',' read -r fair_rate unfair_rate <<<"$fixed_rate"
       label="${prefix}/unfair_$(rate_tag "$unfair_rate")_fair_$(rate_tag "$fair_rate")_$(ts)_proto_${proto}_fairlead_${fair_lead_seconds}s"
-      "$run_once_fn" "$proto" "$fair_rate" "$unfair_rate" "$duration" "$label" "$fair_lead_seconds" || return 1
+      "$run_once_fn" "$proto" "$fair_rate" "$unfair_rate" "$duration" "$label" "$fair_lead_seconds" "$csa_enabled" "$csa_delay" "$csa_channel" "$ap2_follow_enabled" || return 1
       ;;
   esac
 }
@@ -875,7 +1042,7 @@ run_dual_test_with_plan() {
 }
 
 run_two_ap_test_with_plan() {
-  run_dual_plan "$1" "$2" "$3" "$4" "$5" prepare_two_ap_topology run_two_ap_once
+  run_dual_plan "$1" "$2" "$3" "$4" "$5" prepare_two_ap_topology run_two_ap_once "${6:-0}" "${7:-30}" "${8:-6}" "${9:-0}"
 }
 
 # ---------- Results ----------
@@ -939,7 +1106,7 @@ for node_dir in sorted([p for p in raw.iterdir() if p.is_dir()]):
         rel=f.relative_to(node_dir)
         if rel.parts and rel.parts[0] == 'setup':
             continue
-        if 'iperf' not in f.name:
+        if not ('iperf' in f.name or 'channel_switch' in f.name or 'beacon_channel_hunter' in f.name):
             continue
         parsed = split_label(rel.parts[:-1])
         if parsed is None:
@@ -966,7 +1133,7 @@ for node_dir in sorted([p for p in raw.iterdir() if p.is_dir()]):
         rel=f.relative_to(node_dir)
         if rel.parts and rel.parts[0] == 'setup':
             continue
-        if 'iperf' not in f.name:
+        if not ('iperf' in f.name or 'channel_switch' in f.name or 'beacon_channel_hunter' in f.name):
             continue
         parsed = split_label(rel.parts[:-1])
         if parsed is None:
@@ -977,12 +1144,16 @@ for node_dir in sorted([p for p in raw.iterdir() if p.is_dir()]):
         port=file_port(f.name)
         dest_dir=out/exp/role_dir
         dest_dir.mkdir(parents=True, exist_ok=True)
-        if node == fair_node:
+        if 'beacon_channel_hunter' in f.name:
+            new_name=f"unfair_beacon_channel_hunter_{run_stamp}.log"
+        elif node == fair_node:
             new_name=f"{fair_rate}_{run_stamp}.log"
         elif node == unfair_node:
             new_name=f"{unfair_rate}_{run_stamp}.log"
         elif node == ap_node or node == ap2_node:
             suffix=f"_p{port}" if port else ''
+            if 'channel_switch' in f.name:
+                suffix=f"{suffix}_csa"
             new_name=f"unfair_{unfair_rate}_fair_{fair_rate}{suffix}_{run_stamp}.log"
         else:
             new_name=f"{safe(f.stem)}_{run_stamp}.log"
