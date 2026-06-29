@@ -1402,14 +1402,163 @@ def active_driver_caption(opts):
 
 unfair_driver_caption = active_driver_caption(read_unfair_driver_options(experiment_dir))
 
-def write_basic_png(path, title, label_series):
+def parse_local_datetime_from_date_line(line):
+    months={'Jan':1,'Feb':2,'Mar':3,'Apr':4,'May':5,'Jun':6,'Jul':7,'Aug':8,'Sep':9,'Oct':10,'Nov':11,'Dec':12}
+    parts=(line or '').split()
+    if len(parts) >= 6 and parts[1] in months and re.match(r'\d{1,2}:\d{2}:\d{2}$', parts[3]):
+        try:
+            import datetime as _dt
+            hh,mm,ss=map(int, parts[3].split(':'))
+            return _dt.datetime(int(parts[5]), months[parts[1]], int(parts[2]), hh, mm, ss)
+        except Exception:
+            return None
+    return None
+
+def parse_iso_datetime(text):
+    text=(text or '').strip()
+    if not text:
+        return None
+    text=text.replace('Z', '+00:00')
+    # Normalize timezone suffix and then parse without timezone; all node logs in
+    # one run use the same local wall clock, and plot x-axis is relative seconds.
+    if re.search(r'[+-]\d{4}$', text):
+        text=text[:-5] + text[-5:-2] + ':' + text[-2:]
+    text_no_tz=re.sub(r'[+-]\d{2}:\d{2}$', '', text)
+    try:
+        import datetime as _dt
+        for fmt in ('%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M:%S'):
+            try:
+                return _dt.datetime.strptime(text_no_tz, fmt)
+            except Exception:
+                pass
+    except Exception:
+        return None
+    return None
+
+def find_experiment_time_base(exp_dir):
+    starts=[]
+    for f in sorted(exp_dir.rglob('*.log')):
+        if not f.is_file() or 'setup' in f.parts:
+            continue
+        name=f.name
+        if '_client_' not in name and not re.match(r'[^_]+_20\d{6}_\d{6}\.log$', name):
+            continue
+        try:
+            lines=f.read_text(errors='replace').splitlines()[:8]
+        except Exception:
+            continue
+        for line in lines:
+            dt=parse_local_datetime_from_date_line(line)
+            if dt is not None:
+                starts.append(dt)
+                break
+    return min(starts) if starts else None
+
+def extract_channel_from_text(text):
+    patterns=[
+        r'chan_switch request channel=(\d+)',
+        r'target_channel=(\d+)',
+        r'to switch to channel (\d+)',
+        r'target_channel[=:]\s*(\d+)',
+        r'channel=(\d+)',
+    ]
+    for pat in patterns:
+        m=re.search(pat, text or '')
+        if m:
+            return m.group(1)
+    fm=re.search(r'freq(?:uency_mhz)?=(\d+)', text or '') or re.search(r'chan_switch\s+\d+\s+(\d{4})', text or '')
+    if fm:
+        freq=int(fm.group(1))
+        if 2412 <= freq <= 2484:
+            return str(14 if freq == 2484 else 1 + (freq - 2412)//5)
+    return ''
+
+def safe(s): return re.sub(r'[^A-Za-z0-9_.-]+','_',str(s)).strip('_') or 'unknown'
+
+def read_switch_events(exp_dir):
+    base=find_experiment_time_base(exp_dir)
+    events=[]
+    if base is None:
+        return events
+    last_target_by_file={}
+    for f in sorted(exp_dir.rglob('*.log')):
+        if not f.is_file() or 'setup' in f.parts:
+            continue
+        try:
+            lines=f.read_text(errors='replace').splitlines()
+        except Exception:
+            continue
+        rel=str(f.relative_to(exp_dir))
+        node=rel.split('/')[0] if '/' in rel else rel
+        is_ap1='AP_' in node and 'AP2_' not in node
+        pending_channel=''
+        pending_time=None
+        for line in lines:
+            if line.startswith('target_channel='):
+                pending_channel=line.split('=',1)[1].strip()
+                last_target_by_file[rel]=pending_channel
+            if line.startswith('date_before_switch='):
+                pending_time=parse_iso_datetime(line.split('=',1)[1])
+            dt=None
+            m=re.match(r'\[([^\]]+)\]', line)
+            if m:
+                dt=parse_iso_datetime(m.group(1))
+            if line.startswith('date_after_switch='):
+                dt=parse_iso_datetime(line.split('=',1)[1])
+            label=None; channel=''
+            if 'chan_switch request channel=' in line:
+                label='AP2 switch'; channel=extract_channel_from_text(line)
+            elif line.startswith('date_after_switch=') and is_ap1:
+                label='AP1 switch'; channel=last_target_by_file.get(rel, pending_channel)
+            elif 'notified AP ' in line and 'switch to channel' in line:
+                label='hunter notify'; channel=extract_channel_from_text(line)
+            elif '[csa] command:' in line and is_ap1:
+                label='AP1 switch cmd'; channel=last_target_by_file.get(rel, pending_channel) or extract_channel_from_text(line); dt=pending_time
+            if label and dt is not None:
+                x=(dt-base).total_seconds()
+                if -5 <= x <= 10000:
+                    unfair=''; fair=''
+                    pm=re.search(r'unfair_([^_/]+)_fair_([^_/]+)', rel)
+                    if pm:
+                        unfair=safe(pm.group(1)); fair=safe(pm.group(2))
+                    text=label + (f' ch{channel}' if channel else '')
+                    events.append({'x':x, 'label':text, 'channel':channel, 'source':rel, 'node':node, 'unfair':unfair, 'fair':fair})
+    # De-duplicate repeated AP/hunter evidence from the same second/channel/source type.
+    dedup=[]; seen=set()
+    for ev in sorted(events, key=lambda e:(e['x'], e['label'], e['source'])):
+        key=(round(ev['x']), ev['label'], ev['unfair'], ev['fair'])
+        if key in seen:
+            continue
+        seen.add(key); dedup.append(ev)
+    return dedup
+
+switch_events = read_switch_events(experiment_dir)
+if switch_events:
+    evcsv = experiment_dir / 'channel_switch_events.csv'
+    with evcsv.open('w', newline='') as fh:
+        w=csv.DictWriter(fh, fieldnames=['time_s','label','channel','node','source_file'])
+        w.writeheader()
+        for ev in switch_events:
+            w.writerow({'time_s':f"{ev['x']:.3f}", 'label':ev['label'], 'channel':ev['channel'], 'node':ev['node'], 'source_file':ev['source']})
+
+def events_for_pair(unfair, fair):
+    out=[]
+    for ev in switch_events:
+        if ev['unfair'] and ev['fair'] and (ev['unfair'] != unfair or ev['fair'] != fair):
+            continue
+        out.append(ev)
+    return out
+
+def write_basic_png(path, title, label_series, events=None):
     # Pure-stdlib fallback for environments without matplotlib.  It keeps the
     # same PNG filename and draws the actual time-shifted series instead of a
     # placeholder, so old PNGs are not left stale.
     import struct, zlib
-    W,H=1000,560; L,R,T,B=70,30,45,95
+    events = events or []
+    W,H=1000,560; L,R,T,B=70,30,45,(150 if events else 95)
     img=bytearray([255]*(W*H*3))
     def pix(x,y,c):
+        x=int(round(x)); y=int(round(y))
         if 0 <= x < W and 0 <= y < H:
             i=(y*W+x)*3; img[i:i+3]=bytes(c)
     font={
@@ -1459,12 +1608,21 @@ def write_basic_png(path, title, label_series):
             e2=2*err
             if e2>=dy: err+=dy; x0+=sx
             if e2<=dx: err+=dx; y0+=sy
+    def styled_vline(x,y0,y1,c,style_idx):
+        patterns=[(10,5),(3,4),(8,3,2,3),(14,3),(5,2,2,2)]
+        pat=patterns[style_idx % len(patterns)]
+        y=int(round(y0)); y_end=int(round(y1)); on=True; pi=0; rem=pat[0]; seg_start=y
+        while y <= y_end:
+            step=min(rem, y_end-y+1)
+            if on:
+                line(x, seg_start, x, y+step-1, c)
+            y += step; seg_start=y; pi=(pi+1)%len(pat); rem=pat[pi]; on=not on
     def rect(x0,y0,x1,y1,c):
         for y in range(max(0,int(y0)), min(H,int(y1)+1)):
             for x in range(max(0,int(x0)), min(W,int(x1)+1)): pix(x,y,c)
     allpts=[p for _name,pts in label_series for p in pts]
     if not allpts: return
-    xmax=max(1.0, max(x for x,_ in allpts)); ymax=max(1.0, max(y for _,y in allpts))*1.10
+    xmax=max(1.0, max([x for x,_ in allpts] + [ev['x'] for ev in events if ev.get('x') is not None] or [1.0])); ymax=max(1.0, max(y for _,y in allpts))*1.10
     def sx(x): return L + (W-L-R)*x/xmax
     def sy(y): return H-B - (H-T-B)*y/ymax
     # grid + axes
@@ -1472,6 +1630,18 @@ def write_basic_png(path, title, label_series):
         x=L+(W-L-R)*k/5; line(x,T,x,H-B,(230,230,230))
         y=T+(H-T-B)*k/5; line(L,y,W-R,y,(230,230,230))
     line(L,T,L,H-B,(0,0,0)); line(L,H-B,W-R,H-B,(0,0,0))
+    event_colors=[(148,103,189),(255,127,14),(44,160,44),(140,86,75),(127,127,127)]
+    for idx,ev in enumerate(events):
+        if ev.get('x') is None:
+            continue
+        ex=sx(ev['x'])
+        if L <= ex <= W-R:
+            c=event_colors[idx%len(event_colors)]
+            styled_vline(ex,T,H-B,c,idx)
+            ly=H-B+22+(idx%4)*13
+            lx=L+idx//4*260
+            line(lx, ly+5, lx+18, ly+5, c)
+            draw_text(lx+24, ly, ev.get('legend_label') or f"{ev.get('label','switch')} @ {ev.get('x',0):.0f}s", c, scale=1)
     colors=[(31,119,180),(214,39,40),(44,160,44),(148,103,189)]
     for idx,(name,pts) in enumerate(label_series):
         c=colors[idx%len(colors)]
@@ -1508,7 +1678,6 @@ def row_offset_s(r):
     except Exception:
         return 0.0
 
-def safe(s): return re.sub(r'[^A-Za-z0-9_.-]+','_',str(s)).strip('_') or 'unknown'
 rows=list(csv.DictReader(csv_path.open()))
 series=defaultdict(list)
 for r in rows:
@@ -1531,15 +1700,28 @@ for unfair, fair in pairs:
     if not label_series: continue
     title=f"unfair {unfair} / fair {fair}"
     path=outdir/f"unfair_{unfair}_fair_{fair}.png"
+    pair_events=events_for_pair(unfair, fair)
     if plt is None:
-        write_basic_png(path, title, label_series)
+        write_basic_png(path, title, label_series, pair_events)
     else:
         plt.figure(figsize=(10,5))
+        ax=plt.gca()
         for name,pts in label_series:
             xs=[p[0] for p in pts]; ys=[p[1] for p in pts]
-            plt.plot(xs, ys, marker='o', linewidth=1.4, label=name)
+            ax.plot(xs, ys, marker='o', linewidth=1.4, label=name)
+        event_styles=[
+            {'color':'#9467bd', 'linestyle':'--'},
+            {'color':'#ff7f0e', 'linestyle':':'},
+            {'color':'#2ca02c', 'linestyle':'-.'},
+            {'color':'#8c564b', 'linestyle':(0, (5, 1))},
+            {'color':'#7f7f7f', 'linestyle':(0, (3, 1, 1, 1))},
+        ]
+        for idx,ev in enumerate(pair_events):
+            style=event_styles[idx % len(event_styles)]
+            legend_label=ev.get('legend_label') or f"{ev['label']} @ {ev['x']:.0f}s"
+            ax.axvline(ev['x'], linewidth=1.4, alpha=0.85, label=legend_label, **style)
         plt.title(title); plt.xlabel('time (s)'); plt.ylabel('receiver bandwidth (Mbit/s)')
-        plt.grid(True, alpha=0.3); plt.legend()
+        plt.grid(True, alpha=0.3); plt.legend(fontsize=8, loc='best')
         if unfair_driver_caption:
             plt.figtext(0.5, 0.015, unfair_driver_caption, ha='center', va='bottom', fontsize=8, wrap=True)
             plt.tight_layout(rect=(0, 0.06, 1, 1))
@@ -1571,6 +1753,32 @@ plot_results_auto() {
     done
     echo "Plotted $made experiment(s) under: $outroot"
   else
+    plot_results "$indir" "$csv" "$outroot"
+  fi
+}
+
+find_child_experiment_dirs() {
+  local indir="$1"
+  [[ -d "$indir" ]] || return 0
+  find "$indir" -mindepth 1 -maxdepth 2 -type f -name experiment.conf -printf '%h\n' | sort -u
+}
+
+parse_plot_results_auto() {
+  local indir="$1" csv="${2:-$indir/summary.csv}" outroot="${3:-$PLOTS_DIR}" experiments=() exp_dir dest made=0
+  [[ -d "$indir" ]] || { echo "Input directory not found: $indir" >&2; return 1; }
+  mapfile -t experiments < <(find_child_experiment_dirs "$indir")
+  if (( ${#experiments[@]} )); then
+    echo "Found ${#experiments[@]} experiment dir(s) under: $indir"
+    for exp_dir in "${experiments[@]}"; do
+      csv="$exp_dir/summary.csv"
+      dest="$outroot/$(basename "$exp_dir")"
+      parse_results "$exp_dir" "$csv"
+      plot_results "$exp_dir" "$csv" "$dest"
+      ((made+=1))
+    done
+    echo "Parsed and plotted $made experiment(s) under: $outroot"
+  else
+    parse_results "$indir" "$csv"
     plot_results "$indir" "$csv" "$outroot"
   fi
 }
@@ -1800,7 +2008,7 @@ results_menu() {
       1) local out nodes; out=$(prompt_default "Local output dir" "$LOCAL_RESULTS_DIR/collected_$(ts)"); nodes=$(prompt_default "Nodes comma-separated" "$(all_nodes_csv_or_empty)"); run_action "fetch results" fetch_results "$out" "$nodes"; pause;;
       2) local dir csv; dir=$(prompt_default "Experiment log dir" "$LOCAL_RESULTS_DIR"); csv=$(prompt_default "CSV output" "$dir/summary.csv"); run_action "parse results" parse_results "$dir" "$csv"; pause;;
       3) local dir csv out; dir=$(prompt_default "Experiment/collection log dir" "$LOCAL_RESULTS_DIR"); csv=$(prompt_default "CSV file (used only for a single experiment dir)" "$dir/summary.csv"); out=$(prompt_default "Plot output root" "$PLOTS_DIR"); run_action "plot results" plot_results_auto "$dir" "$csv" "$out"; pause;;
-      4) local dir csv out; dir=$(prompt_default "Experiment log dir" "$LOCAL_RESULTS_DIR"); csv=$(prompt_default "CSV output" "$dir/summary.csv"); out=$(prompt_default "Plot output dir" "$PLOTS_DIR/$(basename "$dir")"); run_action "parse results" parse_results "$dir" "$csv"; run_action "plot results" plot_results "$dir" "$csv" "$out"; pause;;
+      4) local dir csv out; dir=$(prompt_default "Experiment/collection log dir" "$LOCAL_RESULTS_DIR"); csv=$(prompt_default "CSV output (used only for a single experiment dir)" "$dir/summary.csv"); out=$(prompt_default "Plot output root" "$PLOTS_DIR"); run_action "parse + plot results" parse_plot_results_auto "$dir" "$csv" "$out"; pause;;
       5) local out; out=$(prompt_default "Dry-run collected output dir" "$LOCAL_RESULTS_DIR/collected_$(ts)_dryrun"); run_action "dry-run dummy results" dry_run_results "$out"; pause;;
       6) clear_node_logs_prompt; pause;;
       b|B) return 0;;
@@ -1847,6 +2055,7 @@ Usage:
   ./run.sh fetch-results [out_dir] [nodes_csv]
   ./run.sh parse-results experiment_dir [csv]
   ./run.sh plot-results experiment_dir [csv] [plot_dir]
+  ./run.sh parse-plot-results experiment_or_collection_dir [csv] [plot_root]
   ./run.sh dry-run [out_dir]
   ./run.sh clear-node-logs [nodes_csv] [remote_log_dir]
   ./run.sh status [nodes_csv]
@@ -1869,6 +2078,7 @@ case "$cmd" in
   fetch-results) fetch_results "${1:-$LOCAL_RESULTS_DIR/collected_$(ts)}" "${2:-}";;
   parse-results) parse_results "${1:?experiment dir required}" "${2:-${1:?}/summary.csv}";;
   plot-results) plot_results_auto "${1:?experiment dir required}" "${2:-${1:?}/summary.csv}" "${3:-$PLOTS_DIR}";;
+  parse-plot-results|parse+plot-results) parse_plot_results_auto "${1:?experiment or collection dir required}" "${2:-${1:?}/summary.csv}" "${3:-$PLOTS_DIR}";;
   dry-run|dryrun) dry_run_results "${1:-$LOCAL_RESULTS_DIR/collected_$(ts)_dryrun}";;
   clear-node-logs|clear-logs) clear_node_logs "${1:-}" "${2:-$NODE_LOG_DIR}";;
   status) status_nodes "${1:-}";;
