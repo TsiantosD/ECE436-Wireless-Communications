@@ -1549,12 +1549,13 @@ def events_for_pair(unfair, fair):
         out.append(ev)
     return out
 
-def write_basic_png(path, title, label_series, events=None):
+def write_basic_png(path, title, label_series, events=None, caption=None):
     # Pure-stdlib fallback for environments without matplotlib.  It keeps the
     # same PNG filename and draws the actual time-shifted series instead of a
     # placeholder, so old PNGs are not left stale.
     import struct, zlib
     events = events or []
+    caption = caption or unfair_driver_caption
     W,H=1000,560; L,R,T,B=70,30,45,(150 if events else 95)
     img=bytearray([255]*(W*H*3))
     def pix(x,y,c):
@@ -1655,8 +1656,8 @@ def write_basic_png(path, title, label_series, events=None):
         rect(W-R-150, T+idx*18, W-R-135, T+idx*18+10, c)
         draw_text(W-R-130, T+idx*18-1, name, c, scale=1)
     draw_text(L, 12, title, (0,0,0), scale=2)
-    if unfair_driver_caption:
-        draw_text(L, H-38, unfair_driver_caption, (0,0,0), scale=1)
+    if caption:
+        draw_text(L, H-38, caption, (0,0,0), scale=1)
     raw=b''.join(b'\x00'+bytes(img[y*W*3:(y+1)*W*3]) for y in range(H))
     def chunk(t,d): return struct.pack('>I',len(d))+t+d+struct.pack('>I',zlib.crc32(t+d)&0xffffffff)
     png=b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',W,H,8,2,0,0,0))+chunk(b'IDAT',zlib.compress(raw,9))+chunk(b'IEND',b'')
@@ -1678,18 +1679,83 @@ def row_offset_s(r):
     except Exception:
         return 0.0
 
+def role_name_from_port(port):
+    return 'fair_STA' if port == fair_port else 'unfair_STA' if port == unfair_port else f"server_port_{port}"
+
+def compact_node_name(node):
+    m = re.search(r'(node\d+)', node or '')
+    return m.group(1) if m else (node or '')
+
+def read_node_link_metrics(exp_dir, node):
+    node_short = compact_node_name(node)
+    metrics = {'signal': '', 'mcs': '', 'tx_bitrate': ''}
+    if not node_short:
+        return metrics
+    candidates = []
+    for node_dir in exp_dir.iterdir() if exp_dir.is_dir() else []:
+        if not node_dir.is_dir():
+            continue
+        if compact_node_name(node_dir.name) != node_short:
+            continue
+        setup = node_dir / 'setup'
+        if setup.is_dir():
+            candidates.extend(sorted(setup.glob(f'{node_short}_connect*.log')))
+            candidates.extend(sorted(setup.glob('*_connect*.log')))
+    seen = set()
+    for f in candidates:
+        if f in seen or not f.is_file():
+            continue
+        seen.add(f)
+        text = f.read_text(errors='replace')
+        signal = re.search(r'\bsignal:\s*([-+]?\d+(?:\.\d+)?)\s*dBm', text, re.IGNORECASE)
+        tx_line = ''
+        for line in text.splitlines():
+            if 'tx bitrate:' in line.lower():
+                tx_line = line.strip()
+                break
+        mcs = re.search(r'\bMCS\s+(\d+)\b', tx_line, re.IGNORECASE)
+        if signal:
+            metrics['signal'] = f"{signal.group(1)} dBm"
+        if tx_line:
+            metrics['tx_bitrate'] = tx_line.split(':', 1)[1].strip() if ':' in tx_line else tx_line
+        if mcs:
+            metrics['mcs'] = mcs.group(1)
+        if metrics['signal'] or metrics['mcs'] or metrics['tx_bitrate']:
+            return metrics
+    return metrics
+
 rows=list(csv.DictReader(csv_path.open()))
+client_node_by_pair_port={}
 series=defaultdict(list)
+loss_series=defaultdict(list)
+jitter_series=defaultdict(list)
 for r in rows:
-    if r.get('role')!='server' or r.get('is_final')=='1':
-        continue
     unfair=safe(r.get('unfair_rate') or 'unknown')
     fair=safe(r.get('fair_rate') or 'unknown')
+    port=r.get('port','')
+    if r.get('role') == 'client' and port:
+        client_node_by_pair_port[(unfair, fair, port)] = r.get('node', '')
+    if r.get('role')!='server' or r.get('is_final')=='1':
+        continue
     try: y=bw_mbps(r['bandwidth'], r['bandwidth_unit'])
     except Exception: continue
-    port=r.get('port','')
-    name='fair_STA' if port == fair_port else 'unfair_STA' if port == unfair_port else f"server_port_{port}"
-    series[(unfair, fair, name)].append((start_s(r['interval_s']) + row_offset_s(r), y))
+    name=role_name_from_port(port)
+    x=start_s(r['interval_s']) + row_offset_s(r)
+    series[(unfair, fair, name)].append((x, y))
+    if r.get('lost') not in (None, ''):
+        try:
+            loss_y=float(r.get('lost') or 0)
+        except Exception:
+            loss_y=None
+        if loss_y is not None:
+            loss_series[(unfair, fair, name, port)].append((x, loss_y))
+    if r.get('jitter_ms') not in (None, ''):
+        try:
+            jitter_y=float(r.get('jitter_ms') or 0)
+        except Exception:
+            jitter_y=None
+        if jitter_y is not None:
+            jitter_series[(unfair, fair, name, port)].append((x, jitter_y))
 pairs=sorted(set((u,f) for u,f,_ in series))
 made=0
 for unfair, fair in pairs:
@@ -1729,6 +1795,131 @@ for unfair, fair in pairs:
             plt.tight_layout()
         plt.savefig(path, dpi=140); plt.close()
     print(path); made+=1
+
+loss_pairs=sorted(set((u,f) for u,f,_,_ in loss_series))
+for unfair, fair in loss_pairs:
+    label_series=[]
+    signal_parts=[]
+    for (u,f,name,port),pts in sorted(loss_series.items()):
+        if u!=unfair or f!=fair or not pts:
+            continue
+        node = client_node_by_pair_port.get((unfair, fair, port), '')
+        metrics = read_node_link_metrics(experiment_dir, node)
+        signal = metrics.get('signal', '')
+        legend = name
+        metric_bits=[]
+        if node:
+            metric_bits.append(compact_node_name(node))
+        if signal:
+            metric_bits.append(f"signal {signal}")
+        if metric_bits:
+            legend += " (" + ", ".join(metric_bits) + ")"
+        caption_bits=[]
+        if signal:
+            caption_bits.append(signal)
+        if caption_bits:
+            prefix = f"{name} {compact_node_name(node)}" if node else name
+            signal_parts.append(f"{prefix}: {', '.join(caption_bits)}")
+        label_series.append((legend, sorted(pts)))
+    if not label_series:
+        continue
+    title=f"packet loss: unfair {unfair} / fair {fair}"
+    path=outdir/f"unfair_{unfair}_fair_{fair}_packet_loss.png"
+    pair_events=events_for_pair(unfair, fair)
+    packet_loss_caption = '; '.join(signal_parts)
+    if packet_loss_caption and unfair_driver_caption:
+        packet_loss_caption = packet_loss_caption + ' | ' + unfair_driver_caption
+    elif unfair_driver_caption:
+        packet_loss_caption = unfair_driver_caption
+    if plt is None:
+        write_basic_png(path, title, label_series, pair_events, packet_loss_caption)
+    else:
+        plt.figure(figsize=(10,5))
+        ax=plt.gca()
+        for name,pts in label_series:
+            xs=[p[0] for p in pts]; ys=[p[1] for p in pts]
+            ax.plot(xs, ys, marker='o', linewidth=1.4, label=name)
+        event_styles=[
+            {'color':'#9467bd', 'linestyle':'--'},
+            {'color':'#ff7f0e', 'linestyle':':'},
+            {'color':'#2ca02c', 'linestyle':'-.'},
+            {'color':'#8c564b', 'linestyle':(0, (5, 1))},
+            {'color':'#7f7f7f', 'linestyle':(0, (3, 1, 1, 1))},
+        ]
+        for idx,ev in enumerate(pair_events):
+            style=event_styles[idx % len(event_styles)]
+            legend_label=ev.get('legend_label') or f"{ev['label']} @ {ev['x']:.0f}s"
+            ax.axvline(ev['x'], linewidth=1.4, alpha=0.85, label=legend_label, **style)
+        plt.title(title); plt.xlabel('time (s)'); plt.ylabel('lost packets per interval')
+        plt.grid(True, alpha=0.3); plt.legend(fontsize=8, loc='best')
+        if packet_loss_caption:
+            plt.figtext(0.5, 0.015, packet_loss_caption, ha='center', va='bottom', fontsize=8, wrap=True)
+            plt.tight_layout(rect=(0, 0.06, 1, 1))
+        else:
+            plt.tight_layout()
+        plt.savefig(path, dpi=140); plt.close()
+    print(path); made+=1
+
+jitter_pairs=sorted(set((u,f) for u,f,_,_ in jitter_series))
+for unfair, fair in jitter_pairs:
+    label_series=[]
+    signal_parts=[]
+    for (u,f,name,port),pts in sorted(jitter_series.items()):
+        if u!=unfair or f!=fair or not pts:
+            continue
+        node = client_node_by_pair_port.get((unfair, fair, port), '')
+        metrics = read_node_link_metrics(experiment_dir, node)
+        signal = metrics.get('signal', '')
+        legend = name
+        metric_bits=[]
+        if node:
+            metric_bits.append(compact_node_name(node))
+        if signal:
+            metric_bits.append(f"signal {signal}")
+        if metric_bits:
+            legend += " (" + ", ".join(metric_bits) + ")"
+        if signal:
+            prefix = f"{name} {compact_node_name(node)}" if node else name
+            signal_parts.append(f"{prefix}: {signal}")
+        label_series.append((legend, sorted(pts)))
+    if not label_series:
+        continue
+    title=f"jitter: unfair {unfair} / fair {fair}"
+    path=outdir/f"unfair_{unfair}_fair_{fair}_jitter.png"
+    pair_events=events_for_pair(unfair, fair)
+    jitter_caption = '; '.join(signal_parts)
+    if jitter_caption and unfair_driver_caption:
+        jitter_caption = jitter_caption + ' | ' + unfair_driver_caption
+    elif unfair_driver_caption:
+        jitter_caption = unfair_driver_caption
+    if plt is None:
+        write_basic_png(path, title, label_series, pair_events, jitter_caption)
+    else:
+        plt.figure(figsize=(10,5))
+        ax=plt.gca()
+        for name,pts in label_series:
+            xs=[p[0] for p in pts]; ys=[p[1] for p in pts]
+            ax.plot(xs, ys, marker='o', linewidth=1.4, label=name)
+        event_styles=[
+            {'color':'#9467bd', 'linestyle':'--'},
+            {'color':'#ff7f0e', 'linestyle':':'},
+            {'color':'#2ca02c', 'linestyle':'-.'},
+            {'color':'#8c564b', 'linestyle':(0, (5, 1))},
+            {'color':'#7f7f7f', 'linestyle':(0, (3, 1, 1, 1))},
+        ]
+        for idx,ev in enumerate(pair_events):
+            style=event_styles[idx % len(event_styles)]
+            legend_label=ev.get('legend_label') or f"{ev['label']} @ {ev['x']:.0f}s"
+            ax.axvline(ev['x'], linewidth=1.4, alpha=0.85, label=legend_label, **style)
+        plt.title(title); plt.xlabel('time (s)'); plt.ylabel('jitter (ms)')
+        plt.grid(True, alpha=0.3); plt.legend(fontsize=8, loc='best')
+        if jitter_caption:
+            plt.figtext(0.5, 0.015, jitter_caption, ha='center', va='bottom', fontsize=8, wrap=True)
+            plt.tight_layout(rect=(0, 0.06, 1, 1))
+        else:
+            plt.tight_layout()
+        plt.savefig(path, dpi=140); plt.close()
+    print(path); made+=1
 print(f'Wrote {made} plots to {outdir}')
 PY
 }
@@ -1760,7 +1951,7 @@ plot_results_auto() {
 find_child_experiment_dirs() {
   local indir="$1"
   [[ -d "$indir" ]] || return 0
-  find "$indir" -mindepth 1 -maxdepth 2 -type f -name experiment.conf -printf '%h\n' | sort -u
+  find "$indir" -mindepth 1 -maxdepth 3 -type f -name experiment.conf -printf '%h\n' | sort -u
 }
 
 parse_plot_results_auto() {
