@@ -19,6 +19,10 @@ plots/
 *.tar.gz
 *.pid
 
+# Curated README figures generated from final experiment data
+!docs/images/results/
+!docs/images/results/*.png
+
 # Editor/OS
 *~
 .idea/

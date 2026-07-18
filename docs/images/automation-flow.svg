@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="title desc">
+  <title id="title">ECE436 experiment automation flow</title>
+  <desc id="desc">Flow from patch generation through remote driver deployment, AP/STA tests, log collection, CSV parsing, and plots.</desc>
+  <defs><marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M2,2 L10,6 L2,10 Z" fill="#22d3ee"/></marker><style>.title{font:700 32px Inter,Segoe UI,sans-serif;fill:#ecfeff}.sub{font:500 15px Inter,Segoe UI,sans-serif;fill:#a5f3fc}.box{rx:18;fill:#0f172a;stroke:#22d3ee;stroke-width:2}.green{stroke:#34d399}.amber{stroke:#fbbf24}.rose{stroke:#fb7185}.txt{font:700 18px Inter,Segoe UI,sans-serif;fill:#f8fafc}.small{font:500 13px Inter,Segoe UI,sans-serif;fill:#cbd5e1}.code{font:700 13px ui-monospace,Consolas,monospace;fill:#bef264}.line{stroke:#22d3ee;stroke-width:3;marker-end:url(#arrow)}</style></defs>
+  <rect width="1200" height="420" fill="#020617"/><circle cx="1040" cy="60" r="250" fill="#0f766e" opacity=".18"/><circle cx="160" cy="360" r="210" fill="#1d4ed8" opacity=".12"/>
+  <text x="52" y="58" class="title">Automation flow</text><text x="54" y="90" class="sub">One script controls patching, deployment, experiments, and result analysis across NITLab nodes</text>
+  <g transform="translate(50,145)"><rect width="160" height="125" class="box"/><text x="80" y="38" text-anchor="middle" class="txt">Patch</text><text x="80" y="66" text-anchor="middle" class="small">generate/apply</text><text x="80" y="93" text-anchor="middle" class="code">ath9k-jammer.patch</text></g>
+  <line x1="220" y1="208" x2="285" y2="208" class="line"/>
+  <g transform="translate(295,145)"><rect width="160" height="125" class="box green"/><text x="80" y="38" text-anchor="middle" class="txt">Deploy</text><text x="80" y="66" text-anchor="middle" class="small">build/install</text><text x="80" y="93" text-anchor="middle" class="code">ath9k_hw opts</text></g>
+  <line x1="465" y1="208" x2="530" y2="208" class="line"/>
+  <g transform="translate(540,145)"><rect width="160" height="125" class="box amber"/><text x="80" y="38" text-anchor="middle" class="txt">Run tests</text><text x="80" y="66" text-anchor="middle" class="small">fair/unfair/two-AP</text><text x="80" y="93" text-anchor="middle" class="code">iperf traffic</text></g>
+  <line x1="710" y1="208" x2="775" y2="208" class="line"/>
+  <g transform="translate(785,145)"><rect width="160" height="125" class="box rose"/><text x="80" y="38" text-anchor="middle" class="txt">Collect logs</text><text x="80" y="66" text-anchor="middle" class="small">fetch from nodes</text><text x="80" y="93" text-anchor="middle" class="code">experiment.conf</text></g>
+  <line x1="955" y1="208" x2="1020" y2="208" class="line"/>
+  <g transform="translate(1030,145)"><rect width="130" height="125" class="box green"/><text x="65" y="38" text-anchor="middle" class="txt">Analyze</text><text x="65" y="66" text-anchor="middle" class="small">CSV + plots</text><text x="65" y="93" text-anchor="middle" class="code">summary.csv</text></g>
+  <text x="52" y="340" class="small">Interactive tabs: Setup → Custom driver options → Test → Results</text>
+</svg>

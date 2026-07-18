@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">ath9k jammer driver mechanisms</title>
+  <desc id="desc">Diagram comparing normal 802.11 CSMA/CA access with the modified ath9k runtime parameters for aggressive channel access.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1"><stop stop-color="#061826"/><stop offset="1" stop-color="#0c2f2e"/></linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#000" flood-opacity="0.35"/></filter>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M2,2 L10,6 L2,10 Z" fill="#67e8f9"/></marker>
+    <style>
+      .title{font:700 34px Inter,Segoe UI,sans-serif;fill:#e6fffb}
+      .sub{font:500 16px Inter,Segoe UI,sans-serif;fill:#a7f3d0}
+      .label{font:700 20px Inter,Segoe UI,sans-serif;fill:#e2e8f0}
+      .small{font:500 14px Inter,Segoe UI,sans-serif;fill:#cbd5e1}
+      .tiny{font:700 12px Inter,Segoe UI,sans-serif;fill:#0f172a}
+      .code{font:700 14px ui-monospace,SFMono-Regular,Consolas,monospace;fill:#bef264}
+      .box{rx:20;fill:#0f172a;stroke:#334155;stroke-width:2;filter:url(#shadow)}
+      .card{rx:14;fill:#11283b;stroke:#22d3ee;stroke-width:1.5}
+      .wait{fill:#fde68a}.backoff{fill:#fca5a5}.tx{fill:#86efac}.jam{fill:#22d3ee}
+      .slot{rx:10;stroke:#475569;stroke-width:1.5}
+      .cross{stroke:#ef4444;stroke-width:5;stroke-linecap:round}
+      .wifi{fill:none;stroke:#94a3b8;stroke-linecap:round}
+    </style>
+  </defs>
+
+  <rect width="1200" height="720" fill="url(#bg)"/>
+  <path d="M0 585 C220 525 350 675 585 610 C790 550 930 610 1200 535 L1200 720 L0 720 Z" fill="#0f766e" opacity="0.18"/>
+
+  <text x="60" y="64" class="title">WiFi Jammer Implementation on ath9k</text>
+  <text x="62" y="96" class="sub">Turning 802.11 channel-access knobs into runtime module parameters</text>
+
+  <!-- Normal path -->
+  <rect x="60" y="135" width="500" height="505" class="box"/>
+  <text x="95" y="181" class="label">Normal 802.11 channel access</text>
+  <text x="95" y="211" class="small">sense channel → wait if busy</text>
+  <text x="95" y="234" class="small">→ random backoff → transmit</text>
+
+  <g transform="translate(95,260)">
+    <rect x="0" y="0" width="96" height="52" class="slot wait"/>
+    <text x="48" y="32" text-anchor="middle" class="tiny">DIFS/AIFS</text>
+    <rect x="116" y="0" width="160" height="52" class="slot backoff"/>
+    <text x="196" y="32" text-anchor="middle" class="tiny">random backoff</text>
+    <rect x="296" y="0" width="110" height="52" class="slot tx"/>
+    <text x="351" y="32" text-anchor="middle" class="tiny">TXOP</text>
+    <line x1="416" y1="26" x2="440" y2="26" stroke="#67e8f9" stroke-width="3" marker-end="url(#arrow)"/>
+  </g>
+
+  <g transform="translate(110,370)">
+    <circle cx="45" cy="45" r="38" fill="#1e293b" stroke="#94a3b8" stroke-width="2"/>
+    <text x="45" y="42" text-anchor="middle" class="small">Fair</text>
+    <text x="45" y="60" text-anchor="middle" class="small">STA</text>
+    <path d="M122 38 C172 6 232 6 282 38" class="wifi" stroke-width="4" opacity=".7"/>
+    <path d="M152 60 C187 38 217 38 252 60" class="wifi" stroke-width="3" opacity=".55"/>
+    <circle cx="360" cy="45" r="38" fill="#1e293b" stroke="#94a3b8" stroke-width="2"/>
+    <text x="360" y="50" text-anchor="middle" class="small">AP</text>
+  </g>
+
+  <text x="95" y="529" class="small">Stations that follow carrier sense and contention windows</text>
+  <text x="95" y="552" class="small">share the medium politely, but can be starved by</text>
+  <text x="95" y="575" class="small">more aggressive MAC behavior.</text>
+
+  <!-- Modified path -->
+  <rect x="640" y="135" width="500" height="505" class="box"/>
+  <text x="675" y="181" class="label">Modified ath9k station</text>
+  <text x="675" y="213" class="small">driver parameters bias the MAC toward immediate access</text>
+
+  <g transform="translate(675,260)">
+    <rect x="0" y="0" width="92" height="52" class="slot jam"/>
+    <text x="46" y="32" text-anchor="middle" class="tiny">AIFS=1</text>
+    <rect x="112" y="0" width="124" height="52" class="slot backoff"/>
+    <text x="174" y="32" text-anchor="middle" class="tiny">CW=0</text>
+    <line x1="122" y1="10" x2="226" y2="42" class="cross"/>
+    <line x1="226" y1="10" x2="122" y2="42" class="cross"/>
+    <rect x="256" y="0" width="132" height="52" class="slot tx"/>
+    <text x="322" y="32" text-anchor="middle" class="tiny">long TXOP</text>
+    <line x1="400" y1="26" x2="440" y2="26" stroke="#67e8f9" stroke-width="3" marker-end="url(#arrow)"/>
+  </g>
+
+  <g transform="translate(675,345)">
+    <rect x="0" y="0" width="430" height="60" class="card"/>
+    <text x="22" y="25" class="code">selfish_mode=1</text>
+    <text x="22" y="45" class="small">CWmin/CWmax → 0, AIFS → 1</text>
+
+    <rect x="0" y="76" width="430" height="60" class="card"/>
+    <text x="22" y="101" class="code">disable_backoff=1</text>
+    <text x="22" y="121" class="small">set IGNORE_BACKOFF in the ath9k hardware path</text>
+
+    <rect x="0" y="152" width="430" height="60" class="card"/>
+    <text x="22" y="177" class="code">chanel_idle=1</text>
+    <text x="22" y="197" class="small">force carrier sense to report an idle channel</text>
+
+    <rect x="0" y="228" width="430" height="60" class="card"/>
+    <text x="22" y="253" class="code">selfish_txop_us=N</text>
+    <text x="22" y="273" class="small">extend the burst duration after winning the medium</text>
+  </g>
+</svg>

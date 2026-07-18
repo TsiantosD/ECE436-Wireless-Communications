@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="640" viewBox="0 0 1200 640" role="img" aria-labelledby="title desc">
+  <title id="title">ECE436 WiFi jammer experiment topologies</title>
+  <desc id="desc">Five experiment stages showing fair baseline, unfair baseline, same-network jamming, unknown-AP jamming, and follow-on channel-switch jamming.</desc>
+  <defs><marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto"><path d="M2,2 L10,6 L2,10 Z" fill="#38bdf8"/></marker><style>.bg{fill:#07111f}.title{font:700 34px Inter,Segoe UI,sans-serif;fill:#e0f2fe}.sub{font:500 16px Inter,Segoe UI,sans-serif;fill:#bae6fd}.card{rx:20;fill:#0f172a;stroke:#334155;stroke-width:2}.head{font:700 20px Inter,Segoe UI,sans-serif;fill:#f8fafc}.txt{font:500 13px Inter,Segoe UI,sans-serif;fill:#cbd5e1}.node{fill:#111827;stroke:#67e8f9;stroke-width:2}.jam{fill:#3b1d2a;stroke:#fb7185;stroke-width:2}.ap{fill:#1e293b;stroke:#a7f3d0;stroke-width:2}.lab{font:700 13px Inter,Segoe UI,sans-serif;fill:#e2e8f0}.channel{stroke:#38bdf8;stroke-width:3;fill:none}.attack{stroke:#fb7185;stroke-width:4;stroke-dasharray:8 6;fill:none;marker-end:url(#arrow)}.wifi{stroke:#60a5fa;stroke-width:2;fill:none;opacity:.35}</style></defs>
+  <rect width="1200" height="640" class="bg"/><path d="M0 0 H1200 V640 H0 Z" fill="url(#grid)" opacity=".1"/>
+  <text x="52" y="58" class="title">Experiment topologies</text><text x="54" y="90" class="sub">From baseline channel access to follow-on jamming across AP/channel changes</text>
+  <g transform="translate(40,130)">
+    <rect width="210" height="190" class="card"/><text x="22" y="34" class="head">1 · Fair baseline</text><circle cx="105" cy="78" r="26" class="ap"/><text x="105" y="83" text-anchor="middle" class="lab">AP</text><circle cx="105" cy="138" r="26" class="node"/><text x="105" y="136" text-anchor="middle" class="lab">STA1</text><path d="M105 104 V112" class="channel"/><text x="28" y="174" class="txt">Unmodified station/AP link</text>
+  </g>
+  <g transform="translate(270,130)">
+    <rect width="210" height="190" class="card"/><text x="22" y="34" class="head">2 · Unfair baseline</text><circle cx="105" cy="78" r="26" class="ap"/><text x="105" y="83" text-anchor="middle" class="lab">AP</text><circle cx="105" cy="138" r="26" class="jam"/><text x="105" y="136" text-anchor="middle" class="lab">STA2</text><path d="M105 104 V112" class="attack"/><text x="23" y="174" class="txt">Modified station only</text>
+  </g>
+  <g transform="translate(500,130)">
+    <rect width="300" height="190" class="card"/><text x="22" y="34" class="head">3 · Same-network jamming</text><circle cx="150" cy="70" r="26" class="ap"/><text x="150" y="75" text-anchor="middle" class="lab">AP</text><circle cx="85" cy="138" r="26" class="node"/><text x="85" y="136" text-anchor="middle" class="lab">STA1</text><circle cx="215" cy="138" r="26" class="jam"/><text x="215" y="136" text-anchor="middle" class="lab">STA2</text><path d="M136 94 L99 116" class="channel"/><path d="M164 94 L201 116" class="attack"/><text x="32" y="174" class="txt">Fair and unfair STAs contend on one AP</text>
+  </g>
+  <g transform="translate(820,130)">
+    <rect width="340" height="190" class="card"/><text x="22" y="34" class="head">4 · Unknown-AP jamming</text><circle cx="90" cy="72" r="26" class="ap"/><text x="90" y="77" text-anchor="middle" class="lab">AP1</text><circle cx="90" cy="138" r="26" class="node"/><text x="90" y="136" text-anchor="middle" class="lab">STA1</text><circle cx="250" cy="72" r="26" class="ap"/><text x="250" y="77" text-anchor="middle" class="lab">AP2</text><circle cx="250" cy="138" r="26" class="jam"/><text x="250" y="136" text-anchor="middle" class="lab">STA2</text><path d="M90 98 V112" class="channel"/><path d="M250 98 V112" class="attack"/><path d="M210 122 C170 95 135 95 104 120" class="attack"/><text x="28" y="174" class="txt">Attacker competes through its own AP/link</text>
+  </g>
+  <g transform="translate(180,370)">
+    <rect width="840" height="210" class="card"/><text x="28" y="42" class="head">5 · Follow-on jammer with channel switch announcement</text>
+    <circle cx="115" cy="102" r="28" class="ap"/><text x="115" y="107" text-anchor="middle" class="lab">AP1</text><circle cx="115" cy="170" r="28" class="node"/><text x="115" y="168" text-anchor="middle" class="lab">STA1</text>
+    <circle cx="700" cy="102" r="28" class="ap"/><text x="700" y="107" text-anchor="middle" class="lab">AP2</text><circle cx="700" cy="170" r="28" class="jam"/><text x="700" y="168" text-anchor="middle" class="lab">STA2</text>
+    <path d="M115 130 V142" class="channel"/><path d="M700 130 V142" class="attack"/>
+    <path d="M170 116 C285 60 395 60 510 116" class="wifi"/><path d="M205 140 C320 100 470 100 625 140" class="wifi"/><path d="M255 162 C370 134 505 134 620 162" class="wifi"/>
+    <path d="M170 105 C340 25 525 35 664 105" class="attack"/><text x="362" y="74" class="txt">CSA beacon observed</text>
+    <path d="M655 90 C585 70 455 75 190 134" class="attack"/><text x="350" y="152" class="txt">attacker requests AP2 channel switch</text>
+    <text x="265" y="195" class="txt">Victim link moves channel; attacker follows and continues jamming on the new channel.</text>
+  </g>
+</svg>
