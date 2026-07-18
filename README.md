@@ -10,7 +10,7 @@ Course project for **ECE436 — Wireless Communications** focused on medium-acce
 The implementation is intended for authorized lab experimentation only. It demonstrates how EDCA/CSMA-CA parameters and selected ath9k hardware registers affect channel access, throughput, and starvation behavior between competing wireless stations.
 
 <p align="center">
-  <img src="docs/images/ath9k-jammer-mechanisms.svg" alt="ath9k jammer mechanism diagram" width="92%">
+  <img src="docs/images/ath9k-jammer-mechanisms.svg" alt="ath9k jammer mechanism diagram" width="100%">
 </p>
 
 ## Highlights
@@ -57,7 +57,7 @@ The final presentation also discusses broader jammer ideas such as deceptive, re
 ## Experiment workflow
 
 <p align="center">
-  <img src="docs/images/automation-flow.svg" alt="Experiment automation flow from patch deployment to plots" width="92%">
+  <img src="docs/images/automation-flow.svg" alt="Experiment automation flow from patch deployment to plots" width="100%">
 </p>
 
 The automation script supports both an interactive menu and direct commands.
@@ -87,7 +87,7 @@ The interactive menu is organized into:
 ## Experiment topologies
 
 <p align="center">
-  <img src="docs/images/experiment-topologies.svg" alt="Five WiFi jammer experiment topologies" width="92%">
+  <img src="docs/images/experiment-topologies.svg" alt="Five WiFi jammer experiment topologies" width="100%">
 </p>
 
 The final presentation describes five stages of testing:
@@ -145,15 +145,21 @@ The parser recognizes iperf2-style throughput lines and records metrics such as 
 Selected throughput plots from the final experiments:
 
 <p align="center">
-  <img src="docs/images/results/fair-baseline-throughput.png" alt="Fair station baseline throughput result" width="48%">
-  <img src="docs/images/results/unfair-baseline-throughput.png" alt="Unfair station baseline throughput result" width="48%">
+  <img src="docs/images/results/fair-baseline-throughput.png" alt="Fair station baseline throughput result" width="100%">
+</p>
+
+<p align="center">
+  <img src="docs/images/results/unfair-baseline-throughput.png" alt="Unfair station baseline throughput result" width="100%">
 </p>
 
 <p align="center"><em>Baseline runs: a fair station stays near the high-80 Mbit/s range, while the modified station reaches a higher standalone throughput when all unfair options are enabled.</em></p>
 
 <p align="center">
-  <img src="docs/images/results/same-ap-all-options-throughput.png" alt="Same-AP jammer result with all unfair options enabled" width="48%">
-  <img src="docs/images/results/two-ap-all-options-throughput.png" alt="Two-AP jammer result with all unfair options enabled" width="48%">
+  <img src="docs/images/results/same-ap-all-options-throughput.png" alt="Same-AP jammer result with all unfair options enabled" width="100%">
+</p>
+
+<p align="center">
+  <img src="docs/images/results/two-ap-all-options-throughput.png" alt="Two-AP jammer result with all unfair options enabled" width="100%">
 </p>
 
 <p align="center"><em>Jammer runs: with `selfish_mode=1`, `disable_backoff=1`, `chanel_idle=1`, and `selfish_txop_us=8100`, the modified station keeps almost all measured throughput while the fair station collapses to near-zero throughput after the unfair node starts transmitting.</em></p>
