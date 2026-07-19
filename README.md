@@ -1,11 +1,12 @@
 # WiFi Jammer Implementation on ath9k
 
-![Language](https://img.shields.io/badge/language-Bash%20%2F%20C-blue)
-![Driver](https://img.shields.io/badge/driver-ath9k-green)
-![Platform](https://img.shields.io/badge/platform-Linux%20backports-lightgrey)
-![Course](https://img.shields.io/badge/course-ECE436-purple)
+![Bash / C](https://img.shields.io/badge/Bash%20%2F%20C-experiments-blue)
+![ath9k](https://img.shields.io/badge/ath9k-driver-green)
+![Linux Backports](https://img.shields.io/badge/Linux-backports-lightgrey)
+![IEEE 802.11](https://img.shields.io/badge/IEEE%20802.11-WiFi-orange)
+![Coursework](https://img.shields.io/badge/UTH-ECE436-teal)
 
-Course project for **ECE436 — Wireless Communications** focused on medium-access unfairness in IEEE 802.11 networks. The project modifies the Linux backports **ath9k** driver so a station can be configured with aggressive MAC-layer behavior, then automates NITLab experiments that compare fair and unfair Wi-Fi stations under controlled topologies.
+Course project for **ECE436 — Wireless Communications** at the **University of Thessaly**, focused on medium-access unfairness in IEEE 802.11 networks. The project modifies the Linux backports **ath9k** driver so a station can be configured with aggressive MAC-layer behavior, then automates NITLab experiments that compare fair and unfair Wi-Fi stations under controlled topologies.
 
 The implementation is intended for authorized lab experimentation only. It demonstrates how EDCA/CSMA-CA parameters and selected ath9k hardware registers affect channel access, throughput, and starvation behavior between competing wireless stations.
 
@@ -163,11 +164,3 @@ Selected throughput plots from the final experiments:
 </p>
 
 <p align="center"><em>Jammer runs: with `selfish_mode=1`, `disable_backoff=1`, `chanel_idle=1`, and `selfish_txop_us=8100`, the modified station keeps almost all measured throughput while the fair station collapses to near-zero throughput after the unfair node starts transmitting.</em></p>
-
-## Authors
-
-- Dimitrios Tsiantos
-- Panagiotis Balamotis
-- Ioannis Iason Nikas
-
-Department of Electrical and Computer Engineering, University of Thessaly.
